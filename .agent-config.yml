@@ -1,0 +1,45 @@
+# ACA — Autonomous Coding Agent Configuration
+# This file lives in the project root that the agent works on.
+
+# LLM
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  # API key read from DEEPSEEK_API_KEY environment variable
+  max_tokens: 8192
+  temperature: 0.0
+
+# Agent behavior
+agent:
+  # Maximum tool calls per turn before requiring user input
+  max_tool_calls_per_turn: 10
+  # Maximum turns for a subagent before forced termination
+  max_subagent_turns: 20
+  # Timeout per tool call (seconds)
+  tool_timeout: 30
+  # Compress conversation when context window exceeds this %
+  compress_threshold: 0.8
+
+# Caching (data-tier, not prompt caching)
+cache:
+  # L2 disk cache TTL (seconds)
+  disk_cache_ttl: 3600
+  # Max L2 cache size (MB)
+  disk_cache_max_size_mb: 500
+
+# Memory
+memory:
+  # Number of recent outcomes to load
+  recent_outcomes_limit: 15
+  # Number of recent sessions to load
+  recent_sessions_limit: 5
+  # Session compression: age before weekly digest (days)
+  weekly_digest_age_days: 7
+  # Session compression: age before monthly digest (days)
+  monthly_digest_age_days: 30
+
+# Logging
+logging:
+  level: INFO
+  file: agent-data/logs/aca.log
+  format: json
