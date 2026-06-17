@@ -1,7 +1,8 @@
 """LLM client for the ACA ecosystem.
 
 Uses the OpenAI-compatible SDK pointed at the configured provider (default: DeepSeek).
-Handles chat completion with automatic prefix caching. Tracks cache hit metrics.
+Handles chat completion (sync + streaming) with automatic prefix caching.
+Tracks cache hit metrics.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -54,6 +56,18 @@ class LLMResponse:
     cached_tokens: int = 0
 
 
+@dataclass
+class StreamEvent:
+    """A single event from a streaming chat completion."""
+
+    type: str  # "thinking", "tool_call", "done"
+    content: str = ""
+    tool_name: str = ""
+    tool_args: dict[str, Any] = field(default_factory=dict)
+    finish_reason: str = ""
+    usage: dict[str, int] = field(default_factory=dict)
+
+
 class LLMClient:
     """Async client for LLM API via OpenAI-compatible SDK.
 
@@ -80,11 +94,7 @@ class LLMClient:
         return self._client
 
     def _compute_prefix_hash(self, messages: list[dict[str, Any]]) -> str:
-        """Compute a stable hash for the static prefix of messages.
-
-        Only hashes everything except the last user message — this is the
-        cacheable prefix that the provider will cache server-side.
-        """
+        """Compute a stable hash for the static prefix of messages."""
         prefix = messages[:-1] if messages else messages
         serialized = json.dumps(prefix, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(serialized.encode()).hexdigest()[:16]
@@ -97,7 +107,7 @@ class LLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> LLMResponse:
-        """Send a chat completion request.
+        """Send a chat completion request (non-streaming).
 
         Args:
             messages: The conversation history (append-only).
@@ -179,6 +189,142 @@ class LLMClient:
                 "cached_tokens": cached_tokens,
             },
             cached_tokens=cached_tokens,
+        )
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Send a streaming chat completion request.
+
+        Yields StreamEvent objects as tokens arrive:
+        - type="thinking": content delta from the LLM's reasoning text
+        - type="tool_call": a complete tool call was detected
+        - type="done": stream finished with usage info
+
+        Tool calls are accumulated across chunks and emitted as a single
+        "tool_call" event once the full JSON arguments are received.
+
+        Args:
+            messages: The conversation history (append-only).
+            tools: Optional tool definitions for function calling.
+            tool_choice: "auto", "none", or "required".
+            temperature: Override default temperature.
+            max_tokens: Override default max tokens.
+
+        Yields:
+            StreamEvent objects.
+        """
+        self.metrics.total_requests += 1
+
+        api_messages = self._convert_messages(messages)
+
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self.config.llm_model,
+                messages=api_messages,
+                tools=tools or [],
+                tool_choice=tool_choice if tools else None,
+                temperature=temperature if temperature is not None else self.config.llm_temperature,
+                max_tokens=max_tokens or self.config.llm_max_tokens,
+                stream=True,
+            )
+        except Exception as e:
+            logger.error("LLM streaming API error: %s", e)
+            raise
+
+        accumulated_content = ""
+        accumulated_tool_calls: dict[int, dict[str, Any]] = {}
+        finish_reason = ""
+        prompt_tokens = 0
+        completion_tokens = 0
+        cached_tokens = 0
+        thinking_sent = False
+
+        async for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta is None:
+                continue
+
+            # Track usage if present in chunk
+            if chunk.usage:
+                prompt_tokens = chunk.usage.prompt_tokens or 0
+                completion_tokens = chunk.usage.completion_tokens or 0
+
+            finish_reason = chunk.choices[0].finish_reason or finish_reason
+
+            # ── Text content ────────────────────
+            if delta.content:
+                accumulated_content += delta.content
+                if not thinking_sent:
+                    thinking_sent = True
+                yield StreamEvent(
+                    type="thinking",
+                    content=delta.content,
+                )
+
+            # ── Tool calls ──────────────────────
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in accumulated_tool_calls:
+                        accumulated_tool_calls[idx] = {
+                            "id": tc_delta.id or "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+
+                    acc = accumulated_tool_calls[idx]
+                    if tc_delta.id:
+                        acc["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            acc["function"]["name"] += tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            acc["function"]["arguments"] += tc_delta.function.arguments
+
+        # ── Emit accumulated tool calls ─────────
+        for tc in sorted(accumulated_tool_calls.values(), key=lambda t: t.get("id", "")):
+            tool_name = tc["function"]["name"]
+            try:
+                tool_args = json.loads(tc["function"]["arguments"])
+            except json.JSONDecodeError:
+                tool_args = {}
+
+            yield StreamEvent(
+                type="tool_call",
+                tool_name=tool_name,
+                tool_args=tool_args,
+                content=tool_name,
+            )
+
+        # ── Done ────────────────────────────────
+        self.metrics.total_prompt_tokens += prompt_tokens
+        self.metrics.cached_prompt_tokens += cached_tokens
+        if cached_tokens > 0:
+            self.metrics.cache_hits += 1
+        else:
+            self.metrics.cache_misses += 1
+
+        yield StreamEvent(
+            type="done",
+            finish_reason=finish_reason,
+            usage={
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cached_tokens": cached_tokens,
+            },
+        )
+
+        logger.info(
+            "LLM stream finished: %d thinking chars, %d tool calls, %d tokens",
+            len(accumulated_content),
+            len(accumulated_tool_calls),
+            prompt_tokens + completion_tokens,
         )
 
     def _convert_messages(

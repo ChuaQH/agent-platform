@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -160,6 +160,45 @@ async def metrics():
         messages=m["messages"],
         estimated_tokens=m["estimated_tokens"],
         llm_metrics=m["llm_metrics"],
+    )
+
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """Send a message and stream the assistant's process via SSE.
+
+    Events:
+        thinking    — LLM's reasoning, streamed token by token
+        thinking_end — thinking phase complete
+        tool_call   — a tool is being executed
+        tool_result — tool completed (with sources for web_search)
+        response    — final answer
+        done        — stream complete
+        error       — something went wrong
+    """
+    if not orchestrator:
+        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
+
+    if not request.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    async def generate():
+        try:
+            async for event in orchestrator.handle_message_stream(request.message):
+                yield event
+        except Exception as e:
+            logger.error("Stream error: %s", e)
+            import json
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

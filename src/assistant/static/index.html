@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ACA Assistant</title>
+    <title>Assistant</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -242,34 +242,145 @@
             font-weight: 600;
         }
 
-        /* ── Loading ─────────────────────────── */
-        .loading-row {
+        /* ── Collapsible thinking ──────────── */
+        .thinking-block {
+            margin-bottom: 16px;
+            animation: msgIn 0.25s ease;
+        }
+        .thinking-summary {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--text-tertiary);
+            cursor: pointer;
+            padding: 4px 0;
+            user-select: none;
+        }
+        .thinking-summary:hover { color: var(--text-secondary); }
+        .thinking-summary .chevron {
+            font-size: 10px;
+            transition: transform 0.2s;
+        }
+        .thinking-block.expanded .chevron {
+            transform: rotate(90deg);
+        }
+        .thinking-summary .spinner {
+            width: 12px; height: 12px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            flex-shrink: 0;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .thinking-detail {
+            display: none;
+            margin-top: 8px;
+            margin-left: 6px;
+            padding-left: 16px;
+            border-left: 2px solid var(--border);
+        }
+        .thinking-block.expanded .thinking-detail {
+            display: block;
+        }
+        .thinking-step {
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            margin-bottom: 8px;
+        }
+        .thinking-step .step-text {
+            display: flex;
+            gap: 8px;
+        }
+        .thinking-step .step-bullet {
+            color: var(--text-tertiary);
+            flex-shrink: 0;
+        }
+        .thinking-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 6px;
+            margin-left: 18px;
+        }
+        .link-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 4px 10px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: all 0.15s;
+        }
+        .link-chip:hover {
+            border-color: var(--accent);
+            color: var(--accent-hover);
+            background: var(--surface-hover);
+        }
+        .link-chip .favicon {
+            width: 14px; height: 14px;
+            border-radius: 2px;
+        }
+        .link-more {
+            font-size: 12px;
+            color: var(--accent);
+            padding: 4px 6px;
+            cursor: pointer;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+        .link-more:hover { color: var(--accent-hover); }
+
+        /* ── Response loading placeholder ────── */
+        .response-loading {
             display: flex;
             gap: 12px;
             margin-bottom: 20px;
             animation: msgIn 0.25s ease;
         }
-        .loading-row .msg-avatar {
+        .response-loading .msg-avatar {
             background: var(--accent-subtle);
             color: var(--accent);
         }
-        .loading-dots {
+        .response-loading .loading-dots {
             display: flex;
             gap: 4px;
             align-items: center;
             padding: 4px 0;
         }
-        .loading-dots span {
+        .response-loading .loading-dots span {
             width: 5px; height: 5px;
             border-radius: 50%;
             background: var(--text-tertiary);
             animation: dotBounce 1.2s infinite ease-in-out;
         }
-        .loading-dots span:nth-child(2) { animation-delay: 0.15s; }
-        .loading-dots span:nth-child(3) { animation-delay: 0.3s; }
+        .response-loading .loading-dots span:nth-child(2) { animation-delay: 0.15s; }
+        .response-loading .loading-dots span:nth-child(3) { animation-delay: 0.3s; }
         @keyframes dotBounce {
             0%, 60%, 100% { transform: translateY(0); }
             30% { transform: translateY(-4px); background: var(--accent); }
+        }
+
+        /* ── Error ───────────────────────────── */
+        .error-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+            animation: msgIn 0.25s ease;
+        }
+        .error-row .msg-avatar {
+            background: rgba(239,68,68,0.12); color: #f87171;
+        }
+        .error-text {
+            font-size: 14px;
+            color: #fca5a5;
+            line-height: 1.5;
         }
 
         /* ── Empty State ─────────────────────── */
@@ -375,7 +486,7 @@
     <div id="app">
         <div id="header">
             <div class="avatar-sm">✦</div>
-            <h1>ACA Assistant</h1>
+            <h1>Assistant</h1>
             <span class="status" id="session-label"></span>
             <div class="actions">
                 <button onclick="newSession()">New chat</button>
@@ -409,7 +520,7 @@
     </div>
 
     <script>
-        const API = '/chat';
+        const API = '/chat/stream';
         const messagesEl = document.getElementById('messages');
         const inputEl = document.getElementById('user-input');
         const sendBtn = document.getElementById('send-btn');
@@ -418,25 +529,17 @@
 
         let isLoading = false;
 
-        // ── Auto-resize ─────────────────────────
+        // ── Auto-resize, keyboard ──────────────
         inputEl.addEventListener('input', () => {
             inputEl.style.height = 'auto';
             inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
         });
-
-        // ── Keyboard shortcuts ──────────────────
         inputEl.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-            }
-            // Escape to blur
-            if (e.key === 'Escape') {
-                inputEl.blur();
-            }
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+            if (e.key === 'Escape') inputEl.blur();
         });
 
-        // ── Send message ────────────────────────
+        // ── Send via SSE ───────────────────────
         async function sendMessage() {
             const text = inputEl.value.trim();
             if (!text || isLoading) return;
@@ -445,11 +548,22 @@
             inputEl.value = '';
             inputEl.style.height = 'auto';
             sendBtn.disabled = true;
-
             if (emptyState) emptyState.remove();
 
+            // User bubble
             addUserMessage(text);
-            const loadingRow = addLoading();
+
+            // SSE stream
+            let thinkBlock = null;
+            let thinkStart = Date.now();
+            let allSources = [];
+            let responseLoading = null;
+            let responseEl = null;
+            let responseBubble = null;
+            let responseText = '';
+
+            // Show loading placeholder immediately
+            responseLoading = addResponseLoading();
 
             try {
                 const res = await fetch(API, {
@@ -463,14 +577,86 @@
                     throw new Error(err.detail || `Server error (${res.status})`);
                 }
 
-                const data = await res.json();
-                loadingRow.remove();
-                addAssistantMessage(data.response);
-                sessionLabel.textContent = data.session_id
-                    ? `· ${data.session_id.slice(0, 8)}`
-                    : '';
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        let event;
+                        try { event = JSON.parse(line.slice(6)); }
+                        catch { continue; }
+
+                        switch (event.type) {
+                            case 'thinking':
+                                if (!thinkBlock) {
+                                    thinkBlock = addThinkingBlock();
+                                }
+                                addThinkingStep(thinkBlock, event.content);
+                                break;
+
+                            case 'tool_result':
+                                if (event.sources && event.sources.length > 0) {
+                                    for (const s of event.sources) {
+                                        if (!allSources.find(x => x.url === s.url)) {
+                                            allSources.push(s);
+                                        }
+                                    }
+                                    updateLinkChips(thinkBlock, allSources);
+                                }
+                                break;
+
+                            case 'response':
+                                if (responseLoading) {
+                                    responseLoading.remove();
+                                    responseLoading = null;
+                                }
+                                if (!responseEl) {
+                                    const row = document.createElement('div');
+                                    row.className = 'msg-row assistant';
+                                    row.innerHTML = `
+                                        <div class="msg-avatar">✦</div>
+                                        <div class="msg-bubble"></div>`;
+                                    messagesEl.appendChild(row);
+                                    responseEl = row;
+                                    responseBubble = row.querySelector('.msg-bubble');
+                                }
+                                responseText += event.content;
+                                marked.setOptions({ breaks: true, gfm: true });
+                                responseBubble.innerHTML = marked.parse(responseText);
+                                break;
+
+                            case 'done':
+                                if (thinkBlock) {
+                                    const elapsed = ((Date.now() - thinkStart) / 1000).toFixed(1);
+                                    finalizeThinking(thinkBlock, elapsed);
+                                }
+                                if (responseLoading) {
+                                    responseLoading.remove();
+                                    responseLoading = null;
+                                }
+                                break;
+
+                            case 'error':
+                                if (responseLoading) {
+                                    responseLoading.remove();
+                                    responseLoading = null;
+                                }
+                                addErrorMessage(event.message);
+                                break;
+                        }
+                        scrollDown();
+                    }
+                }
             } catch (err) {
-                loadingRow.remove();
                 addErrorMessage(err.message);
             } finally {
                 isLoading = false;
@@ -480,73 +666,141 @@
             }
         }
 
-        // ── UI helpers ───────────────────────────
-        function addUserMessage(text) {
+        // ── UI builders ─────────────────────────
+        function addResponseLoading() {
             const row = document.createElement('div');
-            row.className = 'msg-row user';
-            row.innerHTML = `
-                <div class="msg-avatar">U</div>
-                <div class="msg-bubble">${escapeHtml(text)}</div>
-            `;
-            messagesEl.appendChild(row);
-            scrollDown();
-        }
-
-        function addAssistantMessage(markdown) {
-            const row = document.createElement('div');
-            row.className = 'msg-row assistant';
+            row.className = 'response-loading';
             row.innerHTML = `
                 <div class="msg-avatar">✦</div>
-                <div class="msg-bubble"></div>
-            `;
-            const bubble = row.querySelector('.msg-bubble');
-            marked.setOptions({ breaks: true, gfm: true });
-            bubble.innerHTML = marked.parse(markdown);
-            messagesEl.appendChild(row);
-            scrollDown();
-        }
-
-        function addErrorMessage(text) {
-            const row = document.createElement('div');
-            row.className = 'msg-row assistant';
-            row.innerHTML = `
-                <div class="msg-avatar" style="background:rgba(239,68,68,0.12);color:#f87171">!</div>
-                <div class="msg-bubble" style="color:#fca5a5">${escapeHtml(text)}</div>
-            `;
-            messagesEl.appendChild(row);
-            scrollDown();
-        }
-
-        function addLoading() {
-            const row = document.createElement('div');
-            row.className = 'loading-row';
-            row.innerHTML = `
-                <div class="msg-avatar">✦</div>
-                <div class="loading-dots">
-                    <span></span><span></span><span></span>
-                </div>
-            `;
+                <div class="loading-dots"><span></span><span></span><span></span></div>`;
             messagesEl.appendChild(row);
             scrollDown();
             return row;
         }
 
+        function addThinkingBlock() {
+            const block = document.createElement('div');
+            block.className = 'thinking-block';
+            block.innerHTML = `
+                <div class="thinking-summary" onclick="toggleThinking(this.parentElement)">
+                    <span class="chevron">▸</span>
+                    <span class="spinner"></span>
+                    <span class="summary-text">Thinking…</span>
+                </div>
+                <div class="thinking-detail"></div>`;
+            messagesEl.appendChild(block);
+            scrollDown();
+            return block;
+        }
+
+        function addThinkingStep(block, text) {
+            if (!text || !text.trim()) return;
+            const detail = block.querySelector('.thinking-detail');
+            const step = document.createElement('div');
+            step.className = 'thinking-step';
+            step.innerHTML = `
+                <div class="step-text">
+                    <span class="step-bullet">•</span>
+                    <span>${escapeHtml(text)}</span>
+                </div>
+                <div class="thinking-links"></div>`;
+            detail.appendChild(step);
+        }
+
+        function updateLinkChips(block, sources) {
+            if (!block || sources.length === 0) return;
+            const steps = block.querySelectorAll('.thinking-step');
+            if (steps.length === 0) return;
+            const lastStep = steps[steps.length - 1];
+            let linksDiv = lastStep.querySelector('.thinking-links');
+            linksDiv.innerHTML = '';
+
+            const maxShow = 4;
+            const visible = sources.slice(0, maxShow);
+            const hidden = sources.slice(maxShow);
+
+            const renderLink = (s) => {
+                const domain = extractDomain(s.url);
+                const a = document.createElement('a');
+                a.className = 'link-chip';
+                a.href = s.url;
+                a.target = '_blank';
+                a.rel = 'noopener';
+                a.innerHTML = `<img class="favicon" src="https://www.google.com/s2/favicons?domain=${domain}&sz=32" alt="" onerror="this.style.display='none'">${escapeHtml(domain)}`;
+                a.title = s.title;
+                return a;
+            };
+
+            visible.forEach(s => linksDiv.appendChild(renderLink(s)));
+
+            if (hidden.length > 0) {
+                let expanded = false;
+                const hiddenChips = hidden.map(renderLink);
+                const more = document.createElement('span');
+                more.className = 'link-more';
+                more.textContent = `+${hidden.length} more`;
+                more.onclick = function(e) {
+                    e.stopPropagation();
+                    if (!expanded) {
+                        hiddenChips.forEach(c => linksDiv.insertBefore(c, more));
+                        more.textContent = 'Show less';
+                        expanded = true;
+                    } else {
+                        hiddenChips.forEach(c => c.remove());
+                        more.textContent = `+${hidden.length} more`;
+                        expanded = false;
+                    }
+                };
+                linksDiv.appendChild(more);
+            }
+        }
+
+        function finalizeThinking(block, elapsedSec) {
+            const summary = block.querySelector('.thinking-summary');
+            const spinner = summary.querySelector('.spinner');
+            const text = summary.querySelector('.summary-text');
+            if (spinner) spinner.remove();
+            text.textContent = `Thought for ${elapsedSec}s`;
+        }
+
+        function toggleThinking(block) {
+            block.classList.toggle('expanded');
+        }
+
+        function addUserMessage(text) {
+            const row = document.createElement('div');
+            row.className = 'msg-row user';
+            row.innerHTML = `
+                <div class="msg-avatar">U</div>
+                <div class="msg-bubble">${escapeHtml(text)}</div>`;
+            messagesEl.appendChild(row);
+            scrollDown();
+        }
+
+        function extractDomain(url) {
+            try { return new URL(url).hostname.replace('www.', ''); }
+            catch { return url; }
+        }
+
+        function addErrorMessage(text) {
+            const row = document.createElement('div');
+            row.className = 'error-row';
+            row.innerHTML = `
+                <div class="msg-avatar" style="width:32px;height:32px;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:500;background:rgba(239,68,68,0.12);color:#f87171">!</div>
+                <div class="error-text">${escapeHtml(text)}</div>`;
+            messagesEl.appendChild(row);
+            scrollDown();
+        }
+
         function scrollDown() {
-            setTimeout(() => {
-                messagesEl.scrollTop = messagesEl.scrollHeight;
-            }, 10);
+            setTimeout(() => { messagesEl.scrollTop = messagesEl.scrollHeight; }, 10);
         }
 
         function newSession() {
             messagesEl.innerHTML = '';
             const div = document.createElement('div');
-            div.className = 'empty-state';
-            div.id = 'empty-state';
-            div.innerHTML = `
-                <div class="logo">✦</div>
-                <h2>How can I help?</h2>
-                <p>Ask me anything.</p>
-            `;
+            div.className = 'empty-state'; div.id = 'empty-state';
+            div.innerHTML = '<div class="logo">✦</div><h2>How can I help?</h2><p>Ask me anything.</p>';
             messagesEl.appendChild(div);
             sessionLabel.textContent = '';
         }

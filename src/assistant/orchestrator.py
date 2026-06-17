@@ -6,16 +6,17 @@ Uses the shared core infrastructure (LLM client, conversation, tool framework).
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from core.config import Config
 from core.llm_client import LLMClient
 from core.conversation import Conversation
 from core.tool_framework import ToolRegistry
+from core.logging import AgentLogger
 
 from assistant.tools.web_search import WebSearchTool
 from assistant.tools.web_fetch import WebFetchTool
@@ -68,6 +69,9 @@ class AssistantOrchestrator:
         # Active conversation (one per orchestrator instance)
         self.conversation = Conversation()
         self.session_id = uuid.uuid4().hex[:12]
+
+        # Structured trace logger
+        self.trace = AgentLogger("assistant", config.agent_data_dir)
 
     def _register_tools(self) -> None:
         """Register all assistant tools."""
@@ -151,6 +155,153 @@ class AssistantOrchestrator:
         # Max turns exceeded
         logger.warning("Max tool calls (%d) reached for session %s", max_turns, self.session_id)
         return "I've taken too many steps trying to answer. Could you rephrase or simplify your question?"
+
+    async def handle_message_stream(
+        self, user_message: str
+    ) -> AsyncGenerator[str, None]:
+        """Process a user message and stream events via SSE.
+
+        Decision steps use non-streaming chat() for complete reasoning text.
+        The final answer is chunked for smooth streaming UX.
+
+        Yields SSE events:
+        - "thinking": complete reasoning text from LLM (shown once, clean)
+        - "tool_call": a tool is about to be executed
+        - "tool_result": tool execution completed (with sources for web_search)
+        - "response": final answer, streamed token by token
+        - "done": stream complete
+        - "error": something went wrong
+        """
+        self.conversation.add_user_message(user_message)
+        self.trace.request_start(user_message)
+
+        max_turns = self.config.max_tool_calls_per_turn
+        for turn in range(max_turns):
+            # ── Non-streaming: get complete reasoning + tool calls ──
+            self.trace.llm_call(
+                turn, len(self.conversation.messages), len(self.tools)
+            )
+            response = await self.llm.chat(
+                messages=self.conversation.get_messages_for_api(),
+                tools=self.tools.to_openai_schemas(),
+            )
+            self.trace.llm_response(
+                turn,
+                content=response.content or "",
+                tool_calls=response.tool_calls,
+                usage=response.usage,
+                finish_reason=response.finish_reason,
+            )
+
+            reasoning_text = response.content or ""
+
+            # ── No tool calls → final answer ──────
+            if not response.tool_calls:
+                self.conversation.add_assistant_message(content=reasoning_text)
+
+                # Stream the response in chunks for smooth UX
+                if reasoning_text.strip():
+                    import asyncio
+                    chunk_size = 80  # characters per chunk
+                    for i in range(0, len(reasoning_text), chunk_size):
+                        chunk = reasoning_text[i:i + chunk_size]
+                        yield self._sse("response", {"content": chunk})
+                        await asyncio.sleep(0.02)  # 20ms delay — smooth typing feel
+
+                yield self._sse("done", {})
+                self.trace.request_end()
+                return
+
+            # ── Has tool calls → execute them ─────
+            # Emit reasoning as thinking bubble
+            if reasoning_text.strip():
+                yield self._sse("thinking", {"content": reasoning_text})
+                self.trace.thinking(reasoning_text)
+
+            # Add assistant message with tool calls to conversation
+            self.conversation.add_assistant_message(
+                content=reasoning_text or None,
+                tool_calls=response.tool_calls,
+            )
+
+            for tc in response.tool_calls:
+                tool_name = tc["function"]["name"]
+                try:
+                    arguments = json.loads(tc["function"]["arguments"])
+                except json.JSONDecodeError:
+                    arguments = {}
+
+                # Notify frontend: tool is running
+                query_preview = ""
+                if tool_name == "web_search":
+                    query_preview = arguments.get("query", "")
+                elif tool_name == "web_fetch":
+                    query_preview = arguments.get("url", "")
+                elif tool_name == "calculator":
+                    query_preview = arguments.get("expression", "")
+                elif tool_name == "assistant_remember":
+                    query_preview = arguments.get("fact", "")[:80]
+
+                yield self._sse("tool_call", {
+                    "tool_name": tool_name,
+                    "query": query_preview,
+                })
+
+                # Execute the tool
+                logger.info("Tool call: %s(%s)", tool_name, arguments)
+                self.trace.tool_start(tool_name, arguments)
+                result = await self.tools.execute(tool_name, **arguments)
+                success = not result.startswith("Search failed") and not result.startswith("Error")
+                self.trace.tool_end(tool_name, success, result)
+                self.conversation.add_tool_result(
+                    tool_call_id=tc["id"],
+                    tool_name=tool_name,
+                    result=result,
+                )
+
+                # Notify frontend: tool done
+                tool_result_data: dict[str, Any] = {
+                    "tool_name": tool_name,
+                    "success": success,
+                }
+
+                if tool_name == "web_search":
+                    sources = self._extract_sources(result)
+                    tool_result_data["sources"] = sources
+
+                yield self._sse("tool_result", tool_result_data)
+
+            # Continue loop — LLM will process tool results in next turn
+            continue
+
+        # Max turns exceeded
+        yield self._sse("error", {"message": "Max tool calls reached."})
+
+    def _extract_sources(self, search_result: str) -> list[dict[str, str]]:
+        """Extract URL + title sources from a web_search result string."""
+        sources: list[dict[str, str]] = []
+        lines = search_result.split("\n")
+        current_title = ""
+        for line in lines:
+            line = line.strip()
+            if line.startswith("URL: "):
+                url = line[5:].strip()
+                if url and current_title:
+                    # Clean title (remove leading number + dot)
+                    clean_title = current_title
+                    if ". " in clean_title[:5]:
+                        clean_title = clean_title.split(". ", 1)[1]
+                    sources.append({"title": clean_title, "url": url})
+                current_title = ""
+            elif line and not line.startswith("Search results") and not line.startswith("URL:") and line[0].isdigit() and ". " in line[:5]:
+                current_title = line
+        return sources[:5]
+
+    @staticmethod
+    def _sse(event_type: str, data: dict[str, Any]) -> str:
+        """Format a dict as an SSE data line."""
+        payload = json.dumps({"type": event_type, **data}, ensure_ascii=False)
+        return f"data: {payload}\n\n"
 
     def end_session(self) -> None:
         """Archive the current session."""
