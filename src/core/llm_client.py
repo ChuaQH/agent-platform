@@ -50,6 +50,7 @@ class LLMResponse:
     """Structured response from the LLM."""
 
     content: str | None = None
+    reasoning_content: str | None = None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
@@ -131,6 +132,13 @@ class LLMClient:
 
         start_time = time.monotonic()
         try:
+            extra_body = {}
+            if self.config.llm_reasoning:
+                extra_body["thinking"] = {
+                    "type": "enabled",
+                    "effort": self.config.llm_reasoning_effort,
+                }
+
             response = await self.client.chat.completions.create(
                 model=self.config.llm_model,
                 messages=api_messages,
@@ -138,6 +146,7 @@ class LLMClient:
                 tool_choice=tool_choice if tools else None,
                 temperature=temperature if temperature is not None else self.config.llm_temperature,
                 max_tokens=max_tokens or self.config.llm_max_tokens,
+                extra_body=extra_body if extra_body else None,
             )
         except Exception as e:
             logger.error("LLM API error: %s", e)
@@ -147,6 +156,8 @@ class LLMClient:
 
         choice = response.choices[0]
         usage = response.usage
+
+        reasoning_content = getattr(choice.message, "reasoning_content", None)
 
         prompt_tokens = usage.prompt_tokens if usage else 0
         completion_tokens = usage.completion_tokens if usage else 0
@@ -171,6 +182,7 @@ class LLMClient:
 
         return LLMResponse(
             content=choice.message.content,
+            reasoning_content=reasoning_content,
             tool_calls=[
                 {
                     "id": tc.id,

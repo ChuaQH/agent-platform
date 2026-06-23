@@ -1,0 +1,66 @@
+/* ChatGPT-inspired dark theme overrides for Chainlit */
+
+/* ── Color palette ──────────────────────────────── */
+:root {
+  --chatgpt-bg: #171717;
+  --chatgpt-surface: #222222;
+  --chatgpt-border: #2f2f2f;
+  --chatgpt-text: #ececec;
+  --chatgpt-muted: #b4b4b4;
+  --chatgpt-accent: #6b8afd;
+  --chatgpt-user-bubble: #252525;
+}
+
+[data-theme="dark"] {
+  --chatgpt-bg: #171717;
+  --chatgpt-surface: #222222;
+  --chatgpt-border: #2f2f2f;
+  --chatgpt-text: #ececec;
+  --chatgpt-muted: #b4b4b4;
+  --chatgpt-accent: #6b8afd;
+  --chatgpt-user-bubble: #252525;
+}
+
+[data-theme="light"] {
+  --chatgpt-bg: #ffffff;
+  --chatgpt-surface: #f7f7f8;
+  --chatgpt-border: #e5e5e5;
+  --chatgpt-text: #2c2c2c;
+  --chatgpt-muted: #6e6e80;
+  --chatgpt-accent: #6b8afd;
+  --chatgpt-user-bubble: #f0f0f0;
+}
+
+/* ── Reasoning steps: remove left stripe, always visible ── */
+[data-step-type="reasoning"] {
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+
+  h3[data-orientation="vertical"] {
+    display: none !important;
+  }
+
+  div[class*="pb-4"] {
+    padding: 0 !important;
+  }
+
+  div[class*="border-l-2"] {
+    border-left: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  [data-state] {
+    display: block !important;
+  }
+
+  /* Reason text: align with tool button text */
+  .prose {
+    padding-left: 0.25rem !important;
+    margin-left: 0 !important;
+  }
+
+  [role="article"] {
+    margin-top: 0 !important;
+  }
+}

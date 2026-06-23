@@ -21,8 +21,7 @@ dependencies = [
     "sentence-transformers>=3.0.0",  # bge-m3 embeddings
     "aiosqlite>=0.20.0",       # Async SQLite
     "watchfiles>=0.22.0",      # File watcher for cache invalidation
-    "fastapi>=0.115.0",        # Web server for assistant
-    "uvicorn[standard]>=0.30.0",  # ASGI server
+    "chainlit>=2.0.0",         # Chat UI for assistant agent
 ]
 
 [project.optional-dependencies]
@@ -34,6 +33,7 @@ dev = [
 
 [project.scripts]
 aca = "aca.cli.main:app"
+assistant = "assistant.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/core", "src/aca", "src/assistant"]

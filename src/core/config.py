@@ -24,6 +24,8 @@ DEFAULTS: dict[str, Any] = {
         "base_url": "https://api.deepseek.com",
         "max_tokens": 8192,
         "temperature": 0.0,
+        "reasoning": True,
+        "reasoning_effort": "medium",
     },
     "agent": {
         "max_tool_calls_per_turn": 10,
@@ -169,7 +171,7 @@ class Config:
 
     @property
     def llm_model(self) -> str:
-        return self._get("llm", "model", default="deepseek-chat")
+        return self._get("llm", "model", default="deepseek-v4-pro")
 
     @property
     def llm_api_key(self) -> str:
@@ -186,6 +188,14 @@ class Config:
     @property
     def llm_temperature(self) -> float:
         return self._get("llm", "temperature", default=0.0)
+
+    @property
+    def llm_reasoning(self) -> bool:
+        return self._get("llm", "reasoning", default=True)
+
+    @property
+    def llm_reasoning_effort(self) -> str:
+        return self._get("llm", "reasoning_effort", default="high")
 
     # ── Agent ──
     @property

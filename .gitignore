@@ -20,3 +20,6 @@ agent-data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Personal Notes
+src/assistant/personal_notes.md

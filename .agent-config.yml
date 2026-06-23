@@ -4,10 +4,14 @@
 # LLM
 llm:
   provider: deepseek
-  model: deepseek-chat
+  model: deepseek-v4-pro
   # API key read from DEEPSEEK_API_KEY environment variable
   max_tokens: 8192
   temperature: 0.0
+  # Enable DeepSeek reasoning/thinking (sends extra_body: thinking: {type: enabled})
+  reasoning: true
+  # Reasoning effort level: "low", "medium", "high"
+  reasoning_effort: high
 
 # Agent behavior
 agent:
