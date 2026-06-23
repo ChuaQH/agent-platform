@@ -122,7 +122,7 @@ async def on_message(message: cl.Message) -> None:
 
                     result = await orch.tools.execute(tool_name, **arguments)
 
-                    tool_step.output = result
+                    tool_step.output = _format_tool_output(tool_name, result)
 
                     orch.conversation.add_tool_result(
                         tool_call_id=tc["id"],
@@ -183,6 +183,68 @@ def _format_tool_input(tool_name: str, arguments: dict) -> str:
     if tool_name == "assistant_recall":
         return arguments.get("query", "")
     return json.dumps(arguments, indent=2)
+
+
+def _format_tool_output(tool_name: str, result: str) -> str:
+    if tool_name == "web_search":
+        return _format_web_search_result(result)
+    return result
+
+
+def _format_web_search_result(result: str) -> str:
+    sources = _extract_sources(result)
+    if not sources:
+        return result
+
+    lines: list[str] = []
+    for s in sources:
+        domain = _extract_domain(s["url"])
+        lines.append(
+            f"🔗 [{s['title']}]({s['url']}) — *{domain}*  \n"
+            f"> {s.get('snippet', '')}"
+        )
+    return "\n\n".join(lines)
+
+
+def _extract_sources(search_result: str) -> list[dict[str, str]]:
+    sources: list[dict[str, str]] = []
+    lines = search_result.split("\n")
+    current_title = ""
+    current_snippet = ""
+    in_snippet = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("URL: "):
+            url = stripped[5:].strip()
+            if url and current_title:
+                clean_title = current_title
+                if ". " in clean_title[:5]:
+                    clean_title = clean_title.split(". ", 1)[1]
+                sources.append({
+                    "title": clean_title,
+                    "url": url,
+                    "snippet": current_snippet,
+                })
+            current_title = ""
+            current_snippet = ""
+            in_snippet = False
+        elif in_snippet and line.startswith("   ") and not stripped.startswith("URL:"):
+            current_snippet += " " + stripped if current_snippet else stripped
+        elif line and stripped[0].isdigit() and ". " in stripped[:5]:
+            current_title = stripped
+            current_snippet = ""
+            in_snippet = True
+        elif stripped.startswith("Search results"):
+            continue
+    return sources[:5]
+
+
+def _extract_domain(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).hostname or url
+    except Exception:
+        return url
 
 
 def _setup_logging(config) -> None:
