@@ -220,6 +220,9 @@ def _format_tool_label(tool_name: str) -> str:
         "get_user_locale": "Locale",
         "date_math": "Date math",
         "get_user_location": "Location",
+        "currency_convert": "Currency",
+        "get_weather": "Weather",
+        "unit_convert": "Unit convert",
         "assistant_remember": "Remember",
         "assistant_recall": "Recall",
     }

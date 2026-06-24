@@ -21,6 +21,9 @@ from core.logging import AgentLogger
 from core.tools.calculator import CalculatorTool
 from core.tools.datetime_tools import CurrentDatetimeTool, UserTimezoneTool, UserLocaleTool, DateMathTool
 from core.tools.user_location import UserLocationTool
+from core.tools.currency import CurrencyTool
+from core.tools.weather import WeatherTool
+from core.tools.unit_convert import UnitConvertTool
 from assistant.tools.web_search import WebSearchTool
 from assistant.tools.web_fetch import WebFetchTool
 from assistant.tools.personal_memory import RememberTool, RecallTool
@@ -39,6 +42,8 @@ Your capabilities:
 - **Calculator**: You can evaluate mathematical expressions accurately.
 - **Date/time**: You can get the current datetime, the user's timezone, locale, and perform date arithmetic (e.g. "3 days from now").
 - **Location**: You can get the user's approximate location for context-aware responses.
+- **Currency**: You can convert between currencies using live exchange rates.
+- **Weather**: You can get current weather and a 3-day forecast for any location.
 - **Memory**: You can remember facts about the user and recall them later.
 
 Guidelines:
@@ -88,6 +93,9 @@ class AssistantOrchestrator:
         self.tools.register(UserLocaleTool())
         self.tools.register(DateMathTool())
         self.tools.register(UserLocationTool())
+        self.tools.register(CurrencyTool())
+        self.tools.register(WeatherTool())
+        self.tools.register(UnitConvertTool())
         self.tools.register(RememberTool(self.personal_memory))
         self.tools.register(RecallTool(self.personal_memory))
         logger.info(
