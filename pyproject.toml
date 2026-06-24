@@ -21,6 +21,7 @@ dependencies = [
     "sentence-transformers>=3.0.0",  # bge-m3 embeddings
     "aiosqlite>=0.20.0",       # Async SQLite
     "watchfiles>=0.22.0",      # File watcher for cache invalidation
+    "tzdata>=2025.1",          # IANA timezone data (required by zoneinfo on Windows)
     "chainlit>=2.0.0",         # Chat UI for assistant agent
 ]
 

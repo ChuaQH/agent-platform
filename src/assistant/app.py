@@ -37,6 +37,57 @@ if sys.version_info >= (3, 14):
 
 import chainlit as cl
 
+# ── Browser geolocation endpoints ──────────────────────────────────────
+from core.user_context import (
+    set_location,
+    set_timezone,
+    resolve_location,
+    reject_location,
+    is_pending,
+    reset_state,
+)
+from chainlit.server import router as _chainlit_router
+from fastapi import APIRouter as _APIRouter
+from pydantic import BaseModel as _BaseModel
+
+
+class _LocationPayload(_BaseModel):
+    lat: float
+    lng: float
+    timezone: str = ""
+
+
+_geo_router = _APIRouter()
+
+
+@_geo_router.post("/api/location")
+async def _on_browser_location(payload: _LocationPayload):
+    logger.info("geo location received: lat=%s lng=%s tz=%s", payload.lat, payload.lng, payload.timezone)
+    if payload.lat or payload.lng:
+        set_location(payload.lat, payload.lng)
+        resolve_location(payload.lat, payload.lng)
+    elif is_pending():
+        reject_location()
+    if payload.timezone:
+        set_timezone(payload.timezone)
+        logger.info("geo timezone set: %s", payload.timezone)
+    return {"status": "ok"}
+
+
+@_geo_router.get("/api/location/status")
+async def _on_location_status():
+    return {"pending": is_pending()}
+
+
+# Insert before Chainlit's SPA catch-all (/{full_path:path})
+_catch_all_idx = next(
+    i for i, r in enumerate(_chainlit_router.routes)
+    if getattr(r, "path", "") == "/{full_path:path}"
+)
+for route in _geo_router.routes:
+    _chainlit_router.routes.insert(_catch_all_idx, route)
+    _catch_all_idx += 1
+
 _DEV_MODE = os.getenv("ACA_DEV", "").lower() in ("true", "1", "yes")
 if _DEV_MODE:
     cl.instrument_openai()
@@ -54,6 +105,7 @@ if _DEV_MODE:
 async def start() -> None:
     config = load_config()
     _setup_logging(config)
+    reset_state()
     orch = AssistantOrchestrator(config)
     orch.start_session()
     cl.user_session.set("orchestrator", orch)
@@ -163,6 +215,11 @@ def _format_tool_label(tool_name: str) -> str:
         "web_search": "Web search",
         "web_fetch": "Fetch URL",
         "calculator": "Calculate",
+        "get_current_datetime": "Current time",
+        "get_user_timezone": "Time zone",
+        "get_user_locale": "Locale",
+        "date_math": "Date math",
+        "get_user_location": "Location",
         "assistant_remember": "Remember",
         "assistant_recall": "Recall",
     }
@@ -176,13 +233,17 @@ def _format_tool_input(tool_name: str, arguments: dict) -> str:
         return arguments.get("url", "")
     if tool_name == "calculator":
         return arguments.get("expression", "")
+    if tool_name == "date_math":
+        return arguments.get("expression", "")
     if tool_name == "assistant_remember":
         fact = arguments.get("fact", "")
         category = arguments.get("category", "")
         return f"{category}: {fact}" if category else fact
     if tool_name == "assistant_recall":
         return arguments.get("query", "")
-    return json.dumps(arguments, indent=2)
+    if arguments:
+        return json.dumps(arguments, indent=2)
+    return ""
 
 
 def _format_tool_output(tool_name: str, result: str) -> str:

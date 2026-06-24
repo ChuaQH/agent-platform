@@ -53,6 +53,7 @@ confirm_new_chat = true
 cot = "full"
 alert_style = "modern"
 custom_css = "/public/style.css"
+custom_js = "/public/geo.js"
 
 [meta]
 generated_by = "2.11.0"

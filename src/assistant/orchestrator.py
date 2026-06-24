@@ -18,9 +18,11 @@ from core.conversation import Conversation
 from core.tool_framework import ToolRegistry
 from core.logging import AgentLogger
 
+from core.tools.calculator import CalculatorTool
+from core.tools.datetime_tools import CurrentDatetimeTool, UserTimezoneTool, UserLocaleTool, DateMathTool
+from core.tools.user_location import UserLocationTool
 from assistant.tools.web_search import WebSearchTool
 from assistant.tools.web_fetch import WebFetchTool
-from assistant.tools.calculator import CalculatorTool
 from assistant.tools.personal_memory import RememberTool, RecallTool
 from assistant.memory.personal import PersonalMemory
 from assistant.memory.conversations import ConversationMemory
@@ -29,18 +31,21 @@ logger = logging.getLogger(__name__)
 
 # System prompt for the general assistant
 ASSISTANT_SYSTEM_PROMPT = """\
-You are a helpful AI assistant with access to tools for web search, calculations, and memory.
+You are a helpful AI assistant with access to tools for web search, calculations, datetime utilities, and memory.
 
 Your capabilities:
 - **Web search**: You can search the web for current information when you need facts or data beyond your training.
 - **Web fetch**: You can read the contents of a specific URL for detailed information.
 - **Calculator**: You can evaluate mathematical expressions accurately.
+- **Date/time**: You can get the current datetime, the user's timezone, locale, and perform date arithmetic (e.g. "3 days from now").
+- **Location**: You can get the user's approximate location for context-aware responses.
 - **Memory**: You can remember facts about the user and recall them later.
 
 Guidelines:
 - Be concise and helpful.
 - Use web search when you need current or factual information you're unsure about.
 - Use the calculator for math rather than doing it in your head.
+- Use datetime tools when asked about time, dates, or scheduling.
 - When a user tells you something about themselves (name, preferences, projects), use the memory tools to remember it.
 - When starting a conversation, recall what you know about the user.
 - If you don't know something, search for it rather than guessing.
@@ -78,6 +83,11 @@ class AssistantOrchestrator:
         self.tools.register(WebSearchTool(api_key=self.config.brave_api_key))
         self.tools.register(WebFetchTool())
         self.tools.register(CalculatorTool())
+        self.tools.register(CurrentDatetimeTool())
+        self.tools.register(UserTimezoneTool())
+        self.tools.register(UserLocaleTool())
+        self.tools.register(DateMathTool())
+        self.tools.register(UserLocationTool())
         self.tools.register(RememberTool(self.personal_memory))
         self.tools.register(RecallTool(self.personal_memory))
         logger.info(
