@@ -31,6 +31,10 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-httpx>=0.30.0",
 ]
+docs = [
+    "pymupdf>=1.24.0",     # PDF extraction
+    "openpyxl>=3.1.0",     # Spreadsheet reading
+]
 
 [project.scripts]
 aca = "aca.cli.main:app"

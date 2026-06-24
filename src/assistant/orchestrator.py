@@ -24,6 +24,8 @@ from core.tools.user_location import UserLocationTool
 from core.tools.currency import CurrencyTool
 from core.tools.weather import WeatherTool
 from core.tools.unit_convert import UnitConvertTool
+from core.tools.file_io import ReadFileTool, WriteFileTool
+from core.tools.document import ExtractTextTool, ReadSpreadsheetTool
 from assistant.tools.web_search import WebSearchTool
 from assistant.tools.web_fetch import WebFetchTool
 from assistant.tools.personal_memory import RememberTool, RecallTool
@@ -96,6 +98,10 @@ class AssistantOrchestrator:
         self.tools.register(CurrencyTool())
         self.tools.register(WeatherTool())
         self.tools.register(UnitConvertTool())
+        self.tools.register(ReadFileTool())
+        self.tools.register(WriteFileTool())
+        self.tools.register(ExtractTextTool())
+        self.tools.register(ReadSpreadsheetTool())
         self.tools.register(RememberTool(self.personal_memory))
         self.tools.register(RecallTool(self.personal_memory))
         logger.info(

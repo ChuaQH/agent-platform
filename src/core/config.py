@@ -26,6 +26,7 @@ DEFAULTS: dict[str, Any] = {
         "temperature": 0.0,
         "reasoning": True,
         "reasoning_effort": "medium",
+        "multimodal": False,
     },
     "agent": {
         "max_tool_calls_per_turn": 10,
@@ -196,6 +197,10 @@ class Config:
     @property
     def llm_reasoning_effort(self) -> str:
         return self._get("llm", "reasoning_effort", default="high")
+
+    @property
+    def llm_multimodal(self) -> bool:
+        return self._get("llm", "multimodal", default=False)
 
     # ── Agent ──
     @property

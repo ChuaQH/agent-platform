@@ -12,6 +12,8 @@ llm:
   reasoning: true
   # Reasoning effort level: "low", "medium", "high"
   reasoning_effort: high
+  # Enable multimodal input (images, PDF pages as images). Requires a vision-capable model.
+  multimodal: false
 
 # Agent behavior
 agent:

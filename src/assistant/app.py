@@ -93,6 +93,7 @@ if _DEV_MODE:
     cl.instrument_openai()
 
 from core.config import load_config
+from core.context_resolver import resolve_attachments, build_user_message, build_multimodal_content
 from assistant.orchestrator import AssistantOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,18 @@ async def end() -> None:
 @cl.on_message
 async def on_message(message: cl.Message) -> None:
     orch: AssistantOrchestrator = cl.user_session.get("orchestrator")
-    orch.conversation.add_user_message(message.content)
+
+    # Resolve attachments before LLM call
+    elements = getattr(message, "elements", []) or []
+    ctx = resolve_attachments(elements)
+    if ctx and ctx.image_urls and orch.config.llm_multimodal:
+        user_content = build_multimodal_content(message.content, ctx)
+    elif ctx and ctx.text_parts:
+        user_content = build_user_message(message.content, ctx)
+    else:
+        user_content = message.content
+
+    orch.conversation.add_user_message(user_content)
 
     think_start = time.monotonic()
     inline_contents: list[str] = []
@@ -223,6 +235,10 @@ def _format_tool_label(tool_name: str) -> str:
         "currency_convert": "Currency",
         "get_weather": "Weather",
         "unit_convert": "Unit convert",
+        "read_file": "Read file",
+        "write_file": "Write file",
+        "extract_text": "Extract text",
+        "read_spreadsheet": "Read sheet",
         "assistant_remember": "Remember",
         "assistant_recall": "Recall",
     }
