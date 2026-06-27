@@ -239,6 +239,7 @@ def _format_tool_label(tool_name: str) -> str:
         "write_file": "Write file",
         "extract_text": "Extract text",
         "read_spreadsheet": "Read sheet",
+        "inspect_python_code": "Inspect code",
         "assistant_remember": "Remember",
         "assistant_recall": "Recall",
     }

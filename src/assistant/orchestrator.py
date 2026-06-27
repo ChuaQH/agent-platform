@@ -26,6 +26,7 @@ from core.tools.weather import WeatherTool
 from core.tools.unit_convert import UnitConvertTool
 from core.tools.file_io import ReadFileTool, WriteFileTool
 from core.tools.document import ExtractTextTool, ReadSpreadsheetTool
+from core.tools.inspect_python_code import InspectPythonCodeTool
 from assistant.tools.web_search import WebSearchTool
 from assistant.tools.web_fetch import WebFetchTool
 from assistant.tools.personal_memory import RememberTool, RecallTool
@@ -102,6 +103,7 @@ class AssistantOrchestrator:
         self.tools.register(WriteFileTool())
         self.tools.register(ExtractTextTool())
         self.tools.register(ReadSpreadsheetTool())
+        self.tools.register(InspectPythonCodeTool())
         self.tools.register(RememberTool(self.personal_memory))
         self.tools.register(RecallTool(self.personal_memory))
         logger.info(
