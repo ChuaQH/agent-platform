@@ -22,8 +22,13 @@ dependencies = [
     "aiosqlite>=0.20.0",       # Async SQLite
     "watchfiles>=0.22.0",      # File watcher for cache invalidation
     "tzdata>=2025.1",          # IANA timezone data (required by zoneinfo on Windows)
-    "chainlit>=2.0.0",         # Chat UI for assistant agent
+    "sqlalchemy>=2.0.0",       # Database ORM (needed by Chainlit data layer)
+    "aiosqlite>=0.20.0",       # Async SQLite
+    "chainlit>=2.0.0",         # Chat UI for assistant agent (legacy)
+    "fastapi>=0.115.0",        # Web API framework
+    "uvicorn[standard]>=0.32.0", # ASGI server
 ]
+
 
 [project.optional-dependencies]
 dev = [
@@ -39,6 +44,7 @@ docs = [
 [project.scripts]
 aca = "aca.cli.main:app"
 assistant = "assistant.cli:main"
+assistant-server = "assistant.server:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/core", "src/aca", "src/assistant"]

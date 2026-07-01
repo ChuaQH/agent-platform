@@ -66,24 +66,21 @@ class AssistantOrchestrator:
     Handles: user message → LLM → tool calls → execute → observe → respond.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, user_id: str = "default"):
         self.config = config
+        self.user_id = user_id
         self.llm = LLMClient(config)
 
-        # Memory
         data_dir = config.agent_data_dir / "assistant"
         self.personal_memory = PersonalMemory(data_dir)
         self.conversation_memory = ConversationMemory(data_dir / "sessions")
 
-        # Tool registry
         self.tools = ToolRegistry()
         self._register_tools()
 
-        # Active conversation (one per orchestrator instance)
         self.conversation = Conversation()
         self.session_id = uuid.uuid4().hex[:12]
 
-        # Structured trace logger
         self.trace = AgentLogger("assistant", config.agent_data_dir)
 
     def _register_tools(self) -> None:
@@ -104,8 +101,8 @@ class AssistantOrchestrator:
         self.tools.register(ExtractTextTool())
         self.tools.register(ReadSpreadsheetTool())
         self.tools.register(InspectPythonCodeTool())
-        self.tools.register(RememberTool(self.personal_memory))
-        self.tools.register(RecallTool(self.personal_memory))
+        self.tools.register(RememberTool(self.personal_memory, user_id=self.user_id))
+        self.tools.register(RecallTool(self.personal_memory, user_id=self.user_id))
         logger.info(
             "Registered %d tools: %s",
             len(self.tools),

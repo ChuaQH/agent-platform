@@ -71,26 +71,22 @@ class PersonalMemory:
         logger.info("Remembered: [%s] %s", category, fact[:80])
         return entry.id
 
-    def recall(self, query: str, n_results: int = 5) -> list[MemoryEntry]:
-        """Recall facts matching the query via simple keyword search.
-
-        TODO: Upgrade to embedding-based semantic search (bge-m3).
-        """
+    def recall(self, query: str, n_results: int = 5, user_id: str = "default") -> list[MemoryEntry]:
+        """Recall facts matching the query via simple keyword search."""
         query_lower = query.lower()
         scored: list[tuple[int, MemoryEntry]] = []
 
         for entry in self._entries.values():
-            # Simple relevance: count keyword matches in fact + category
+            if entry.user_id != user_id:
+                continue
             score = 0
             fact_lower = entry.fact.lower()
             cat_lower = entry.category.lower()
-
             for word in query_lower.split():
                 if word in fact_lower:
                     score += 2
                 if word in cat_lower:
                     score += 1
-
             if score > 0:
                 scored.append((score, entry))
 

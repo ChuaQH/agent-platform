@@ -1,2 +1,0 @@
-1. Why is there expected prefix hits? in llm_client.py, what is the use of it?
-2. Not sure if personal memory is needed for the assistant agent.

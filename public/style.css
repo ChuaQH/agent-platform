@@ -52,6 +52,9 @@
 
   [data-state] {
     display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+    animation: none !important;
   }
 
   /* Reason text: align with tool button text */

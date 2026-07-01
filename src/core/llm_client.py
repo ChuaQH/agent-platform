@@ -107,6 +107,7 @@ class LLMClient:
         tool_choice: str = "auto",
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning: bool | None = None,
     ) -> LLMResponse:
         """Send a chat completion request (non-streaming).
 
@@ -116,6 +117,7 @@ class LLMClient:
             tool_choice: "auto", "none", or "required".
             temperature: Override default temperature.
             max_tokens: Override default max tokens.
+            reasoning: Override reasoning/thinking. None uses config default.
 
         Returns:
             LLMResponse with content, tool calls, and usage info.
@@ -133,11 +135,14 @@ class LLMClient:
         start_time = time.monotonic()
         try:
             extra_body = {}
-            if self.config.llm_reasoning:
+            use_reasoning = reasoning if reasoning is not None else self.config.llm_reasoning
+            if use_reasoning:
                 extra_body["thinking"] = {
                     "type": "enabled",
                     "effort": self.config.llm_reasoning_effort,
                 }
+            elif reasoning is False:
+                extra_body["thinking"] = {"type": "disabled"}
 
             response = await self.client.chat.completions.create(
                 model=self.config.llm_model,

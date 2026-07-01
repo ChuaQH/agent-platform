@@ -37,6 +37,14 @@ if sys.version_info >= (3, 14):
 
 import chainlit as cl
 
+# ── Authentication ─────────────────────────────────────────────────────
+from assistant.auth import (
+    init_db as _init_auth_db,
+    password_auth_callback,
+    oauth_callback,
+    register_user,
+)
+
 # ── Browser geolocation endpoints ──────────────────────────────────────
 from core.user_context import (
     set_location,
@@ -74,9 +82,20 @@ async def _on_browser_location(payload: _LocationPayload):
     return {"status": "ok"}
 
 
+@_geo_router.post("/api/auth/register")
+async def _on_register(payload: dict):
+    email = payload.get("email", "").strip()
+    password = payload.get("password", "")
+    display_name = payload.get("display_name", "")
+    result = register_user(email, password, display_name or None)
+    if "error" in result:
+        return {"error": result["error"]}
+    return {"status": "ok", "user": {"id": result["id"], "email": result["email"]}}
+
+
 @_geo_router.get("/api/location/status")
 async def _on_location_status():
-    return {"pending": is_pending()}
+    return {"pending": is_pending()}  
 
 
 # Insert before Chainlit's SPA catch-all (/{full_path:path})
@@ -91,6 +110,7 @@ for route in _geo_router.routes:
 _DEV_MODE = os.getenv("ACA_DEV", "").lower() in ("true", "1", "yes")
 if _DEV_MODE:
     cl.instrument_openai()
+    _llm_trace_prefix = "LLM: "
 
 from core.config import load_config
 from core.context_resolver import resolve_attachments, build_user_message, build_multimodal_content
@@ -101,15 +121,104 @@ logger = logging.getLogger(__name__)
 if _DEV_MODE:
     logger.info("Development mode enabled — OpenAI instrumentation active")
 
+# ── Chainlit auth callbacks ──────────────────────────────────────────────
+from core.config import load_config as _load_config_early
+_early_config = _load_config_early()
+_init_auth_db(_early_config.agent_data_dir / "users.db")
+
+@cl.data_layer
+def get_data_layer():
+    from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+    return SQLAlchemyDataLayer(conninfo="sqlite+aiosqlite:///agent-data/chat_history.db")
+
+# Pre-create tables that SQLAlchemyDataLayer expects
+import sqlite3 as _sqlite3
+_db = _sqlite3.connect("agent-data/chat_history.db")
+_db.executescript("""
+    CREATE TABLE IF NOT EXISTS users (
+        id          TEXT PRIMARY KEY,
+        identifier  TEXT NOT NULL UNIQUE,
+        metadata    TEXT NOT NULL DEFAULT '{}',
+        createdAt   TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS threads (
+        id          TEXT PRIMARY KEY,
+        name        TEXT,
+        userId      TEXT,
+        userIdentifier TEXT,
+        tags        TEXT,
+        createdAt   TEXT NOT NULL DEFAULT '',
+        metadata    TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE TABLE IF NOT EXISTS steps (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        type        TEXT NOT NULL,
+        threadId    TEXT NOT NULL,
+        parentId    TEXT,
+        streaming   INTEGER NOT NULL DEFAULT 0,
+        waitForAnswer INTEGER NOT NULL DEFAULT 0,
+        isError     INTEGER NOT NULL DEFAULT 0,
+        metadata    TEXT DEFAULT '{}',
+        tags        TEXT,
+        input       TEXT DEFAULT '',
+        output      TEXT DEFAULT '',
+        createdAt   TEXT NOT NULL DEFAULT '',
+        start       TEXT,
+        end         TEXT,
+        generation  TEXT,
+        showInput   TEXT,
+        language    TEXT,
+        indent      INTEGER,
+        defaultOpen  INTEGER NOT NULL DEFAULT 0,
+        autoCollapse INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS elements (
+        id          TEXT PRIMARY KEY,
+        threadId    TEXT NOT NULL,
+        type        TEXT NOT NULL,
+        url         TEXT,
+        chainlitKey TEXT,
+        name        TEXT NOT NULL,
+        display     TEXT,
+        objectKey   TEXT,
+        size        TEXT,
+        page        INTEGER,
+        language    TEXT,
+        forId       TEXT,
+        mime        TEXT,
+        props       TEXT DEFAULT '{}',
+        metadata    TEXT DEFAULT '{}'
+    );
+    CREATE TABLE IF NOT EXISTS feedbacks (
+        id          TEXT PRIMARY KEY,
+        forId       TEXT NOT NULL,
+        threadId    TEXT NOT NULL,
+        value       INTEGER NOT NULL,
+        comment     TEXT,
+        metadata    TEXT DEFAULT '{}'
+    );
+""")
+_db.commit()
+_db.close()
+
+cl.password_auth_callback(password_auth_callback)
+cl.oauth_callback(oauth_callback)
+
 
 @cl.on_chat_start
 async def start() -> None:
     config = load_config()
     _setup_logging(config)
     reset_state()
-    orch = AssistantOrchestrator(config)
+
+    user = cl.user_session.get("user")
+    user_id = user.metadata.get("user_id", "default") if user else "default"
+
+    orch = AssistantOrchestrator(config, user_id=user_id)
     orch.start_session()
     cl.user_session.set("orchestrator", orch)
+    cl.user_session.set("config", config)
     logger.info("Session started: %s", orch.session_id)
 
 
@@ -125,7 +234,6 @@ async def end() -> None:
 async def on_message(message: cl.Message) -> None:
     orch: AssistantOrchestrator = cl.user_session.get("orchestrator")
 
-    # Resolve attachments before LLM call
     elements = getattr(message, "elements", []) or []
     ctx = resolve_attachments(elements)
     if ctx and ctx.image_urls and orch.config.llm_multimodal:
@@ -155,9 +263,9 @@ async def on_message(message: cl.Message) -> None:
                 if response.content and response.content.strip():
                     inline_contents.append(response.content.strip())
                 if reasoning.strip():
-                    think_step.name = _truncate(reasoning.strip(), 50)
                     async with cl.Step(name="", type="reasoning", default_open=True) as reason_step:
                         reason_step.output = reasoning.strip()
+                    think_step.name = _truncate(reasoning.strip(), 50)
                 break
 
             orch.conversation.add_assistant_message(
@@ -169,10 +277,9 @@ async def on_message(message: cl.Message) -> None:
                 inline_contents.append(response.content.strip())
 
             if reasoning.strip():
-                think_step.name = _truncate(reasoning.strip(), 50)
                 async with cl.Step(name="", type="reasoning", default_open=True) as reason_step:
                     reason_step.output = reasoning.strip()
-                await think_step.update()
+                think_step.name = _truncate(reasoning.strip(), 50)
 
             for tc in response.tool_calls:
                 tool_name = tc["function"]["name"]
@@ -199,11 +306,8 @@ async def on_message(message: cl.Message) -> None:
         await think_step.update()
 
     for content in inline_contents:
-        msg = cl.Message(content="")
+        msg = cl.Message(content=content)
         await msg.send()
-        for chunk in _chunk_text(content):
-            await msg.stream_token(chunk)
-        await msg.update()
 
 
     if not inline_contents:
