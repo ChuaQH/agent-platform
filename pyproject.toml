@@ -22,9 +22,12 @@ dependencies = [
     "aiosqlite>=0.20.0",       # Async SQLite
     "watchfiles>=0.22.0",      # File watcher for cache invalidation
     "tzdata>=2025.1",          # IANA timezone data (required by zoneinfo on Windows)
-    "sqlalchemy>=2.0.0",       # Database ORM (needed by Chainlit data layer)
-    "aiosqlite>=0.20.0",       # Async SQLite
-    "chainlit>=2.0.0",         # Chat UI for assistant agent (legacy)
+    "sqlalchemy[asyncio]>=2.0.0",  # Database ORM with async support
+    "asyncpg>=0.30.0",         # Async PostgreSQL driver
+    "psycopg[binary]>=3.2.0",  # Sync PostgreSQL driver
+    "alembic>=1.14.0",         # Database migrations
+    "tiktoken>=0.7.0",         # Token counting for context management
+    "pgvector>=0.3.0",         # PostgreSQL vector extension client
     "fastapi>=0.115.0",        # Web API framework
     "uvicorn[standard]>=0.32.0", # ASGI server
 ]

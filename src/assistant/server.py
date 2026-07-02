@@ -1,4 +1,4 @@
-"""FastAPI server for the assistant agent — replaces Chainlit app.py.
+"""FastAPI server for the assistant agent.
 
 Provides:
 - Auth endpoints (login, register, me, logout)
@@ -16,14 +16,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import Config
 
-# Load .env before reading environment variables
 from pathlib import Path as _Path
 try:
     from dotenv import load_dotenv
@@ -50,6 +50,7 @@ from assistant.tools.personal_memory import RememberTool, RecallTool
 from assistant.memory.personal import PersonalMemory
 from assistant import auth
 from assistant import thread_store
+from core.db import init_engine, get_session
 
 logger = logging.getLogger(__name__)
 
@@ -82,27 +83,9 @@ class UpdateTitleRequest(BaseModel):
     title: str
 
 
-# ── App factory ───────────────────────────────────────────────────────────
-
+# ── Config ─────────────────────────────────────────────────────────────────
 
 config = Config(project_root=Path(__file__).resolve().parent.parent.parent)
-auth_db_path = config.agent_data_dir / "users.db"
-auth.init_db(auth_db_path)
-logger.info("Auth DB initialized at module load: %s", auth_db_path)
-
-assistant_db_path = config.agent_data_dir / "assistant.db"
-thread_store.init_store(assistant_db_path)
-
-app = FastAPI(title="ACA Assistant API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["X-Thread-Id"],
-)
 
 # ── System prompt ─────────────────────────────────────────────────────────
 
@@ -130,12 +113,50 @@ Guidelines:
 """
 
 
+def _get_response_preferences_prompt() -> str:
+    prefs = config.response_preferences
+    return f"""Assistant response preferences:
+- Use {prefs.get('verbosity', 'balanced')} detail.
+- Use a {prefs.get('tone', 'direct')}, {prefs.get('structure', 'organized')} style.
+- Prefer {prefs.get('explanation_depth', 'practical')} explanations.
+- Use examples when {prefs.get('examples', 'when_useful')}.
+- Use tables when {prefs.get('tables', 'when_comparing')}.
+- Give {prefs.get('recommendations', 'clear_with_tradeoffs')} recommendations.
+- Ask clarifying questions {prefs.get('clarifying_questions', 'only_when_needed')}.
+- Cite sources when {prefs.get('citations', 'when_researching')}.
+
+Important:
+These preferences describe response style only. They are not a complete profile of the user's factual preferences, interests, projects, or history. Search user/context memories when user-specific facts may be relevant."""
+
+
+# ── App factory ───────────────────────────────────────────────────────────
+
+
+app = FastAPI(title="ACA Assistant API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Thread-Id"],
+)
+
+
+# ── DB dependency ─────────────────────────────────────────────────────────
+
+
+async def get_db() -> AsyncSession:
+    async for session in get_session():
+        yield session
+
+
 # ── Tool registry (shared per-process) ────────────────────────────────────
 
 
-def _build_tool_registry(user_id: str) -> ToolRegistry:
-    data_dir = config.agent_data_dir / "assistant"
-    personal_memory = PersonalMemory(data_dir)
+def _build_tool_registry(user_id: str, db: AsyncSession) -> ToolRegistry:
+    personal_memory = PersonalMemory(db)
     registry = ToolRegistry()
     registry.register(WebSearchTool(api_key=config.brave_api_key))
     registry.register(WebFetchTool())
@@ -161,23 +182,23 @@ def _build_tool_registry(user_id: str) -> ToolRegistry:
 # ── Auth helpers ─────────────────────────────────────────────────────────
 
 
-def _get_user_id(request: Request) -> int:
+async def _get_user_id(request: Request, db: AsyncSession) -> int:
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid token")
     token = auth_header[7:]
-    user = auth.get_user_by_token(token)
+    user = await auth.get_user_by_token(db, token)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user["id"]
 
 
-def _get_user(request: Request) -> dict:
+async def _get_user(request: Request, db: AsyncSession) -> dict:
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid token")
     token = auth_header[7:]
-    user = auth.get_user_by_token(token)
+    user = await auth.get_user_by_token(db, token)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user
@@ -195,38 +216,38 @@ def _sse(event_type: str, data: dict[str, Any]) -> str:
 
 
 @app.post("/api/auth/register")
-async def register(req: RegisterRequest):
-    result = auth.register_user(req.email, req.password, req.display_name)
+async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    result = await auth.register_user(db, req.email, req.password, req.display_name)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
-    auth.update_last_login(result["id"])
-    token = auth.create_session(result["id"])
+    await auth.update_last_login(db, result["id"])
+    token = await auth.create_session(db, result["id"])
     return {"user": result, "token": token}
 
 
 @app.post("/api/auth/login")
-async def login(req: LoginRequest):
-    user = auth.get_user_by_email(req.email)
+async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+    user = await auth.get_user_by_email(db, req.email)
     if not user or not user.get("password_hash"):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not auth.verify_password(req.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    auth.update_last_login(user["id"])
-    token = auth.create_session(user["id"])
+    await auth.update_last_login(db, user["id"])
+    token = await auth.create_session(db, user["id"])
     return {"user": user, "token": token}
 
 
 @app.get("/api/auth/me")
-async def me(request: Request):
-    user = _get_user(request)
+async def me(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await _get_user(request, db)
     return user
 
 
 @app.post("/api/auth/logout")
-async def logout(request: Request):
+async def logout(request: Request, db: AsyncSession = Depends(get_db)):
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
-        auth.delete_session(auth_header[7:])
+        await auth.delete_session(db, auth_header[7:])
     return {"ok": True}
 
 
@@ -257,7 +278,7 @@ async def google_login():
 
 
 @app.get("/api/auth/google/callback")
-async def google_callback(code: str):
+async def google_callback(code: str, db: AsyncSession = Depends(get_db)):
     import httpx
     from fastapi.responses import RedirectResponse
 
@@ -298,20 +319,20 @@ async def google_callback(code: str):
     if not email:
         return RedirectResponse(f"{FRONTEND_URL}/login?error=google_auth_failed")
 
-    user = auth.get_user_by_google_id(google_sub)
+    user = await auth.get_user_by_google_id(db, google_sub)
     if not user:
-        existing = auth.get_user_by_email(email)
+        existing = await auth.get_user_by_email(db, email)
         if existing:
-            auth.link_google_id(existing["id"], google_sub)
+            await auth.link_google_id(db, existing["id"], google_sub)
             user = existing
         else:
-            result = auth.create_user(email=email, google_id=google_sub, display_name=name)
+            result = await auth.create_user(db, email=email, google_id=google_sub, display_name=name)
             if "error" in result:
                 return RedirectResponse(f"{FRONTEND_URL}/login?error={result['error']}")
             user = result
 
-    auth.update_last_login(user["id"])
-    token = auth.create_session(user["id"])
+    await auth.update_last_login(db, user["id"])
+    token = await auth.create_session(db, user["id"])
 
     return RedirectResponse(f"{FRONTEND_URL}/auth/callback?token={token}")
 
@@ -320,38 +341,55 @@ async def google_callback(code: str):
 
 
 @app.get("/api/threads")
-async def list_threads(request: Request):
-    user_id = _get_user_id(request)
-    return thread_store.list_threads(user_id)
+async def list_threads(request: Request, db: AsyncSession = Depends(get_db)):
+    user_id = await _get_user_id(request, db)
+    return await thread_store.list_threads(db, user_id)
 
 
 @app.post("/api/threads")
-async def create_thread(request: Request, req: CreateThreadRequest):
-    user_id = _get_user_id(request)
-    return thread_store.create_thread(user_id, req.title)
+async def create_thread(
+    request: Request,
+    req: CreateThreadRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    user_id = await _get_user_id(request, db)
+    return await thread_store.create_thread(db, user_id, req.title)
 
 
 @app.get("/api/threads/{thread_id}")
-async def get_thread(request: Request, thread_id: str):
-    _get_user_id(request)
-    thread = thread_store.get_thread(thread_id)
+async def get_thread(
+    request: Request,
+    thread_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    await _get_user_id(request, db)
+    thread = await thread_store.get_thread(db, thread_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
-    messages = thread_store.get_messages(thread_id)
+    messages = await thread_store.get_messages(db, thread_id)
     return {"thread": thread, "messages": messages}
 
 
 @app.delete("/api/threads/{thread_id}")
-async def delete_thread(request: Request, thread_id: str):
-    _get_user_id(request)
-    thread_store.delete_thread(thread_id)
+async def delete_thread(
+    request: Request,
+    thread_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    await _get_user_id(request, db)
+    await thread_store.delete_thread(db, thread_id)
     return {"ok": True}
 
 
 @app.put("/api/threads/{thread_id}/title")
-async def update_thread_title(request: Request, thread_id: str, req: UpdateTitleRequest):
-    _get_user_id(request)
-    result = thread_store.update_thread_title(thread_id, req.title)
+async def update_thread_title(
+    request: Request,
+    thread_id: str,
+    req: UpdateTitleRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    await _get_user_id(request, db)
+    result = await thread_store.update_thread_title(db, thread_id, req.title)
     if not result:
         raise HTTPException(status_code=404, detail="Thread not found")
     return result
@@ -361,7 +399,6 @@ async def update_thread_title(request: Request, thread_id: str, req: UpdateTitle
 
 
 async def _generate_title(user_message: str, llm: LLMClient) -> str | None:
-    """Generate a concise title from the first user message using a lightweight LLM call."""
     conversation = Conversation()
     conversation.set_static_prefix([
         (
@@ -390,22 +427,26 @@ async def _generate_title(user_message: str, llm: LLMClient) -> str | None:
 
 
 @app.post("/api/chat")
-async def chat(request: Request, req: ChatRequest):
-    user = _get_user(request)
+async def chat(
+    request: Request,
+    req: ChatRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await _get_user(request, db)
     user_id = str(user["id"])
 
     thread_id = req.thread_id
     is_new_thread = not thread_id
     if not thread_id:
-        thread = thread_store.create_thread(user["id"])
-        thread_id = thread["id"]
+        thread = await thread_store.create_thread(db, user["id"])
+        thread_id = thread["thread_id"]
 
-    # Save user message to DB
     user_msg = req.messages[-1] if req.messages else None
     if user_msg and user_msg.get("role") == "user":
-        thread_store.save_message(thread_id, "user", user_msg.get("content", ""))
+        await thread_store.save_message(
+            db, thread_id, user["id"], "user", content=user_msg.get("content", "")
+        )
 
-    # Capture first user message for title generation
     first_user_msg = ""
     if is_new_thread:
         for msg in req.messages:
@@ -415,13 +456,13 @@ async def chat(request: Request, req: ChatRequest):
 
     async def event_stream():
         llm = LLMClient(config)
-        tools = _build_tool_registry(user_id)
+        tools = _build_tool_registry(user_id, db)
         conversation = Conversation()
-        conversation.set_static_prefix([ASSISTANT_SYSTEM_PROMPT])
+        conversation.set_static_prefix([
+            ASSISTANT_SYSTEM_PROMPT,
+            _get_response_preferences_prompt(),
+        ])
 
-        # Reconstruct conversation from provided messages
-        # The frontend sends assistant messages with tool_calls containing
-        # results inline — we split them into assistant + tool messages.
         for msg in req.messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
@@ -438,7 +479,6 @@ async def chat(request: Request, req: ChatRequest):
                     content=content,
                     tool_calls=tool_calls,
                 )
-                # Emit tool result messages for each tool call that has a result
                 if isinstance(tool_calls, list):
                     for tc in tool_calls:
                         if isinstance(tc, dict) and "result" in tc:
@@ -456,7 +496,6 @@ async def chat(request: Request, req: ChatRequest):
 
         max_turns = config.max_tool_calls_per_turn
         assistant_content_parts: list[str] = []
-        all_tool_calls: list[dict] = []
         all_reasoning: list[str] = []
         total_turns = 0
 
@@ -517,35 +556,36 @@ async def chat(request: Request, req: ChatRequest):
                         "result": result,
                     })
 
-                    all_tool_calls.append({
-                        "id": tc["id"],
-                        "name": tool_name,
-                        "arguments": arguments,
-                        "result": result,
-                    })
-
                     conversation.add_tool_result(
                         tool_call_id=tc["id"],
                         tool_name=tool_name,
                         result=result,
                     )
 
+                    await thread_store.save_message(
+                        db,
+                        thread_id,
+                        user["id"],
+                        "tool",
+                        tool_name=tool_name,
+                        tool_call_id=tc["id"],
+                        tool_result={"result": result, "arguments": arguments},
+                    )
+
                 continue
 
             break
 
-        # Save assistant response to DB
+        if all_reasoning:
+            await thread_store.save_message(
+                db, thread_id, user["id"], "assistant",
+                reasoning="\n\n".join(all_reasoning),
+            )
+
         if assistant_content_parts:
-            metadata: dict = {}
-            if all_tool_calls:
-                metadata["tool_calls"] = all_tool_calls
-            if all_reasoning:
-                metadata["reasoning"] = all_reasoning
-            thread_store.save_message(
-                thread_id,
-                "assistant",
-                "\n".join(assistant_content_parts),
-                metadata if metadata else None,
+            await thread_store.save_message(
+                db, thread_id, user["id"], "assistant",
+                content="\n".join(assistant_content_parts),
             )
 
         yield _sse("usage", {
@@ -554,13 +594,11 @@ async def chat(request: Request, req: ChatRequest):
             "turns": total_turns,
         })
 
-        # Auto-generate title for new threads before yielding done,
-        # so the frontend picks it up on its next refresh cycle.
         if is_new_thread and first_user_msg:
             try:
                 title = await _generate_title(first_user_msg, llm)
                 if title:
-                    thread_store.update_thread_title(thread_id, title)
+                    await thread_store.update_thread_title(db, thread_id, title)
             except Exception:
                 pass
 
@@ -594,6 +632,28 @@ async def geo(request: Request, req: GeoRequest):
 
 
 # ── Startup ───────────────────────────────────────────────────────────────
+
+
+@app.on_event("startup")
+async def startup():
+    logger.info("Initializing database engine: %s", config.database_url)
+    init_engine(config.database_url)
+
+    from core.db.base import Base
+    from assistant.models import (
+        User, Session, ThreadState, ConversationMessage, CompactionCheckpoint,
+    )
+    async with get_session() as session:
+        async with session.bind.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    logger.info("Database tables ensured.")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    from core.db import close_engine
+    await close_engine()
+    logger.info("Database engine closed.")
 
 
 if __name__ == "__main__":

@@ -62,46 +62,33 @@ export function MyRuntimeProvider({
           const m = data.messages[i];
           const parts: AnyPart[] = [];
 
-          if (m.role === "assistant" && m.metadata) {
-            try {
-              const meta = JSON.parse(m.metadata);
-              const reasoningList: string[] = meta.reasoning || [];
-              const toolList: any[] = meta.tool_calls || [];
-              let rIdx = 0;
+          if (m.reasoning) {
+            parts.push({ type: "reasoning", text: m.reasoning });
+          }
 
-              for (const tc of toolList) {
-                if (rIdx < reasoningList.length) {
-                  parts.push({ type: "reasoning", text: reasoningList[rIdx] });
-                  rIdx++;
-                }
-                parts.push({
-                  type: "tool-call",
-                  toolCallId: tc.id,
-                  toolName: tc.name,
-                  args: tc.arguments,
-                  result: tc.result,
-                  status: { type: "complete" },
-                });
-              }
-              while (rIdx < reasoningList.length) {
-                parts.push({ type: "reasoning", text: reasoningList[rIdx] });
-                rIdx++;
-              }
-            } catch {
-              // ignore parse errors
-            }
+          if (m.role === "tool") {
+            parts.push({
+              type: "tool-call",
+              toolCallId: m.tool_call_id || "",
+              toolName: m.tool_name || "",
+              args: m.tool_result?.arguments || {},
+              result: m.tool_result?.result,
+              status: { type: "complete" },
+            });
           }
 
           if (m.content) {
             parts.push({ type: "text", text: m.content });
           }
 
-          msgs.push({
-            id: nextId(),
-            role: m.role as "user" | "assistant",
-            content: (parts.length > 0 ? parts : [{ type: "text" as const, text: m.content || "" }]) as unknown as ThreadMessageLike["content"],
-            parentId: i === 0 ? null : msgs[i - 1]!.id,
-          } as ThreadMessageLike);
+          if (parts.length > 0) {
+            msgs.push({
+              id: nextId(),
+              role: m.role as "user" | "assistant",
+              content: parts as unknown as ThreadMessageLike["content"],
+              parentId: i === 0 ? null : msgs[msgs.length - 1]?.id ?? null,
+            } as ThreadMessageLike);
+          }
         }
         setMessages(msgs);
       } catch {

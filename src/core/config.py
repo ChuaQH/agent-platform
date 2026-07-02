@@ -49,6 +49,20 @@ DEFAULTS: dict[str, Any] = {
         "file": "agent-data/logs/aca.log",
         "format": "json",
     },
+    "database": {
+        "url": "postgresql+asyncpg://postgres:postgres@localhost:5432/agent_platform",
+    },
+    "response_preferences": {
+        "verbosity": "balanced",
+        "tone": "direct",
+        "structure": "organized",
+        "explanation_depth": "practical",
+        "examples": "when_useful",
+        "tables": "when_comparing",
+        "recommendations": "clear_with_tradeoffs",
+        "clarifying_questions": "only_when_needed",
+        "citations": "when_researching",
+    },
     "tools": {
         "brave_api_key": "",
     },
@@ -75,6 +89,7 @@ ENV_MAP: dict[str, tuple[tuple[str, ...], Any]] = {
     "ACA_LOG_FILE":             (("logging", "file"), str),
     "ACA_LOG_FORMAT":           (("logging", "format"), str),
     "BRAVE_API_KEY":            (("tools", "brave_api_key"), str),
+    "DATABASE_URL":             (("database", "url"), str),
 }
 
 
@@ -244,6 +259,16 @@ class Config:
     @property
     def monthly_digest_age_days(self) -> int:
         return self._get("memory", "monthly_digest_age_days", default=30)
+
+    # ── Database ──
+    @property
+    def database_url(self) -> str:
+        return self._get("database", "url", default="postgresql+asyncpg://postgres:postgres@localhost:5432/agent_platform")
+
+    # ── Response Preferences ──
+    @property
+    def response_preferences(self) -> dict:
+        return self._get("response_preferences", default=DEFAULTS["response_preferences"])
 
     # ── Logging ──
     @property

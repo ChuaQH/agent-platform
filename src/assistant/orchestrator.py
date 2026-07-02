@@ -31,7 +31,8 @@ from assistant.tools.web_search import WebSearchTool
 from assistant.tools.web_fetch import WebFetchTool
 from assistant.tools.personal_memory import RememberTool, RecallTool
 from assistant.memory.personal import PersonalMemory
-from assistant.memory.conversations import ConversationMemory
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +67,14 @@ class AssistantOrchestrator:
     Handles: user message → LLM → tool calls → execute → observe → respond.
     """
 
-    def __init__(self, config: Config, user_id: str = "default"):
+    def __init__(self, config: Config, user_id: str = "default", db: AsyncSession | None = None):
         self.config = config
         self.user_id = user_id
         self.llm = LLMClient(config)
 
-        data_dir = config.agent_data_dir / "assistant"
-        self.personal_memory = PersonalMemory(data_dir)
-        self.conversation_memory = ConversationMemory(data_dir / "sessions")
+        self.personal_memory: PersonalMemory | None = None
+        if db is not None:
+            self.personal_memory = PersonalMemory(db)
 
         self.tools = ToolRegistry()
         self._register_tools()
@@ -101,8 +102,9 @@ class AssistantOrchestrator:
         self.tools.register(ExtractTextTool())
         self.tools.register(ReadSpreadsheetTool())
         self.tools.register(InspectPythonCodeTool())
-        self.tools.register(RememberTool(self.personal_memory, user_id=self.user_id))
-        self.tools.register(RecallTool(self.personal_memory, user_id=self.user_id))
+        if self.personal_memory is not None:
+            self.tools.register(RememberTool(self.personal_memory, user_id=self.user_id))
+            self.tools.register(RecallTool(self.personal_memory, user_id=self.user_id))
         logger.info(
             "Registered %d tools: %s",
             len(self.tools),
@@ -325,14 +327,6 @@ class AssistantOrchestrator:
         """Format a dict as an SSE data line."""
         payload = json.dumps({"type": event_type, **data}, ensure_ascii=False)
         return f"data: {payload}\n\n"
-
-    def end_session(self) -> None:
-        """Archive the current session."""
-        self.conversation_memory.archive_session(
-            self.session_id,
-            self.conversation.messages,
-        )
-        logger.info("Session %s archived", self.session_id)
 
     @property
     def metrics(self) -> dict[str, Any]:
