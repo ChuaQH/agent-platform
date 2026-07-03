@@ -22,6 +22,8 @@ class UserLocationTool(Tool):
         "Calling this will show a button for the user to share their "
         "location via a browser GPS prompt."
     )
+    when_to_use = "When you need the user's approximate location for context-aware responses."
+    how_to_use = "No arguments required. Returns city, region, country, and coordinates."
     parameters = {
         "type": "object",
         "properties": {},

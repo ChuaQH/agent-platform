@@ -106,7 +106,7 @@ export function ThinkingAccordion({
           "data-[state=closed]:duration-(--animation-duration)",
         )}
       >
-        <div className="border-t">{children}</div>
+        <div className="border-t p-3">{children}</div>
       </CollapsibleContent>
     </Collapsible>
   );

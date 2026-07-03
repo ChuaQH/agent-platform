@@ -1,7 +1,7 @@
 """Context builder — cache-aware prompt ordering, token budget, adaptive checkpoint compaction.
 
 Implements:
-- 7-section prompt ordering (static → prefs → checkpoint → messages → dynamic → latest user)
+- 5-section prompt ordering (system → tool policy → prefs → checkpoint → messages)
 - Token estimation via tiktoken
 - Two-pass compaction: tool output pruning → full checkpoint summarization
 - Stable checkpoint summaries
@@ -83,11 +83,10 @@ Summarized outputs (include reference IDs):"""
 @dataclass
 class PromptParts:
     static_instructions: str = ""
+    tool_policy: str = ""
     response_preferences: str = ""
     checkpoint_summary: str | None = None
     recent_messages: list[dict[str, Any]] = field(default_factory=list)
-    dynamic_context: str = ""
-    latest_user_message: str = ""
 
 
 class ContextBuilder:
@@ -147,10 +146,14 @@ class ContextBuilder:
         self,
         db: AsyncSession,
         system_instructions: str,
+        tool_policy: str,
         user_id: int,
         thread_id: str,
     ) -> list[str]:
-        parts = [system_instructions, self._format_response_preferences()]
+        parts = [system_instructions]
+        if tool_policy:
+            parts.append(tool_policy)
+        parts.append(self._format_response_preferences())
 
         checkpoint = await self._get_latest_checkpoint(db, user_id, thread_id)
         if checkpoint and checkpoint.summary:
@@ -162,12 +165,12 @@ class ContextBuilder:
         self,
         db: AsyncSession,
         system_instructions: str,
+        tool_policy: str,
         user_id: int,
         thread_id: str,
-        latest_user_message: str,
     ) -> list[dict[str, Any]]:
         static_prefix = await self.build_static_prefix(
-            db, system_instructions, user_id, thread_id
+            db, system_instructions, tool_policy, user_id, thread_id
         )
 
         messages = await self._get_messages_for_context(db, user_id, thread_id)

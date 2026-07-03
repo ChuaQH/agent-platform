@@ -66,6 +66,8 @@ class CalculatorTool(Tool):
         "Supports basic arithmetic, trigonometry, logarithms, and constants (pi, e). "
         "Examples: 'sqrt(144) + 3*5', 'sin(pi/2)', 'log(100, 10)'"
     )
+    when_to_use = "For mathematical calculations that are best done precisely rather than mentally."
+    how_to_use = "Provide a mathematical expression (e.g., 'sqrt(144) + 3*5')."
     parameters = {
         "type": "object",
         "properties": {

@@ -1,132 +1,230 @@
-# ACA Ecosystem
+# Agent Platform
 
-Autonomous coding agent + general assistant sharing a common core library.
+**Current focus: Assistant Agent**
 
-## Quick Start — Assistant Web App
+Agent Platform is a personal learning project for building and experimenting with AI agents. The current working application is a chatbot-style **Assistant Agent** that supports tool calling, semantic memory, persistent conversation history, reasoning visibility, and a web-based chat interface.
 
-### 1. Backend (Python)
+The project originally started as an autonomous coding agent, but I shifted focus toward building a strong assistant agent first. This gives me a practical environment to experiment with the core design problems behind useful agents: tool definitions, memory retrieval, prompt preprocessing, context management, skills, and different orchestration patterns.
+
+The long-term goal is to learn through real usage and iteration, rather than assuming that any one agent architecture is always best.
+
+---
+
+## Features
+
+* **Assistant chat interface** built on assistant-ui with custom UI components for reasoning, tool calls, feedback, and thread management
+* **FastAPI backend** with Server-Sent Events chat streaming
+* **ReAct-style tool loop** for tool calling and response generation
+* **Custom tool framework** for defining tool schemas, usage rules, and execution logic
+* **Semantic memory** using PostgreSQL, pgvector, and bge-m3 embeddings
+* **Persistent conversation history** for user messages, assistant responses, reasoning, tool calls, and tool results
+* **Reasoning / thinking display** in the chat UI
+* **LLM call logging** for token usage, latency, cached tokens, and tool-call metadata
+* **Feedback collection** for improving and debugging assistant responses
+* **Authentication** with email/password and optional Google OAuth
+* **Shared core library** for LLM calls, tools, config, database access, and embeddings
+
+---
+
+## Learning Focus
+
+This project is also a hands-on environment for exploring what makes agents useful in practice.
+
+Areas I am using it to experiment with include:
+
+* How tools should be described and exposed to the model
+* When the assistant should call tools versus answer directly
+* How memory should be stored, retrieved, and used
+* When prompts should be preprocessed or compacted
+* How much control should be handled by the model versus the surrounding system
+* How reusable **skills** can guide higher-level workflows beyond raw tool calls
+* When more complex architectures are useful, such as planner-executor flows, orchestrator-led ReAct loops, supervisor/sub-agent systems, or parallel agent/tool calls
+
+The goal is not to make the architecture more complex for its own sake, but to test which patterns are actually useful for my own workflows as the primary user.
+
+---
+
+## Architecture Overview
+
+```text
+User
+  ↓
+Next.js Assistant Web UI
+  ↓ REST + SSE
+FastAPI Backend
+  ↓
+Assistant Agent Loop
+  ↓
+LLM Client
+  ↓
+Tools / Memory / PostgreSQL
+  ↓
+Assistant Response
+```
+
+Main components:
+
+```text
+apps/assistant-web/    Next.js frontend built on assistant-ui
+src/assistant/         Assistant backend and assistant-specific logic
+src/core/              Shared LLM, tool, config, database, and embedding utilities
+src/aca/               Early coding-agent prototype
+PostgreSQL + pgvector  Persistent storage and semantic memory
+```
+
+The repository is named **Agent Platform** because the codebase is structured to support reusable agent infrastructure over time. However, the current practical focus is the **Assistant Agent**.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+* Python 3.11+
+* Node.js 18+
+* Docker / Docker Compose
+* DeepSeek API key
+* Brave Search API key, if using web search
+
+### 1. Start PostgreSQL
 
 ```bash
-# Install dependencies
+docker compose up -d
+```
+
+### 2. Backend Setup
+
+```bash
 pip install -e .
 
-# Copy and fill in environment variables
 cp .env.example .env
-# Required: DEEPSEEK_API_KEY, BRAVE_API_KEY
-# Optional (for Google sign-in): OAUTH_GOOGLE_CLIENT_ID, OAUTH_GOOGLE_CLIENT_SECRET
+```
 
-# Start the API server
+Fill in the required environment variables:
+
+```env
+DEEPSEEK_API_KEY=your_deepseek_api_key
+BRAVE_API_KEY=your_brave_api_key
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/agent_platform
+```
+
+Optional Google OAuth variables:
+
+```env
+OAUTH_GOOGLE_CLIENT_ID=your_google_client_id
+OAUTH_GOOGLE_CLIENT_SECRET=your_google_client_secret
+FRONTEND_URL=http://localhost:3000
+```
+
+Run migrations and start the backend:
+
+```bash
+alembic upgrade head
+
 python -m uvicorn assistant.server:app --host 0.0.0.0 --port 8000
 ```
 
-### 2. Frontend (Next.js)
+### 3. Frontend Setup
 
 ```bash
 cd apps/assistant-web
 
-# Install dependencies
 npm install
-
-# Start dev server
 npm run dev
 ```
 
-Open http://localhost:3000.
+Open:
 
-### 3. Google OAuth Setup
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
-2. Create an OAuth 2.0 Client ID (Web application)
-3. Add `http://localhost:3000/api/auth/google/callback` as an authorized redirect URI
-4. Copy Client ID and Client Secret to `.env`:
-   ```
-   OAUTH_GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
-   OAUTH_GOOGLE_CLIENT_SECRET=GOCSPX-xxx
-   ```
+```text
+http://localhost:3000
+```
 
 ---
 
 ## Project Structure
 
-```
-autonomous-coding-agent/
+```text
+agent-platform/
 ├── apps/
-│   └── assistant-web/        # Next.js frontend (assistant-ui)
-│       ├── app/              # Pages: root, login, auth callback
-│       ├── components/       # Chat UI components (reasoning, tools, thread)
-│       └── lib/              # Auth provider + thread context
+│   └── assistant-web/        # Next.js assistant UI
 │
 ├── src/
-│   ├── core/                 # Shared library (LLM client, config, tools)
-│   ├── aca/                  # Coding agent
-│   └── assistant/            # General chatbot
-│       ├── server.py         # FastAPI server (auth, threads, chat SSE)
-│       ├── orchestrator.py   # ReAct loop with 18 tools
-│       ├── auth.py           # Email/password + Google OAuth, thread storage
-│       ├── memory/           # Personal + conversation memory
-│       └── tools/            # Web search, web fetch, memory tools
+│   ├── core/                 # Shared LLM, tool, config, DB, and embedding utilities
+│   ├── assistant/            # Main assistant agent backend
+│   └── aca/                  # Early coding-agent prototype
 │
+├── migrations/               # Alembic migrations
+├── scripts/                  # Development scripts
+├── docker-compose.yml        # PostgreSQL + pgvector
 ├── pyproject.toml
-├── .agent-config.yml
-└── scripts/check_imports.py
+└── README.md
 ```
 
 ---
 
-## Backend API
+## Tech Stack
 
-| Method | Endpoint                          | Auth   | Description                           |
-|--------|-----------------------------------|--------|---------------------------------------|
-| POST   | `/api/auth/register`              | No     | Create account with email + password  |
-| POST   | `/api/auth/login`                 | No     | Email + password sign in              |
-| GET    | `/api/auth/google/login`          | No     | Redirect to Google OAuth              |
-| GET    | `/api/auth/google/callback`       | No     | Google OAuth callback                 |
-| GET    | `/api/auth/me`                    | Token  | Get current user                      |
-| POST   | `/api/auth/logout`                | Token  | Invalidate session                    |
-| GET    | `/api/threads`                    | Token  | List user's threads                   |
-| POST   | `/api/threads`                    | Token  | Create new thread                     |
-| GET    | `/api/threads/:id`                | Token  | Get thread with messages              |
-| DELETE | `/api/threads/:id`                | Token  | Delete thread                         |
-| PUT    | `/api/threads/:id/title`          | Token  | Update thread title                   |
-| POST   | `/api/chat`                       | Token  | Send message, receive SSE stream      |
-| POST   | `/api/geo`                        | Token  | Submit browser geolocation            |
-
-Chat SSE events: `reasoning` → `tool_call` → `tool_result` → `text` → `done`
+| Area          | Tech                                 |
+| ------------- | ------------------------------------ |
+| Backend       | FastAPI, Uvicorn                     |
+| Frontend      | Next.js, React                       |
+| Chat UI base  | assistant-ui                         |
+| Streaming     | Server-Sent Events                   |
+| LLM provider  | DeepSeek via OpenAI-compatible SDK   |
+| Database      | PostgreSQL                           |
+| Vector search | pgvector                             |
+| ORM           | SQLAlchemy async                     |
+| Migrations    | Alembic                              |
+| Embeddings    | bge-m3 via sentence-transformers     |
+| Auth          | Email/password, Google OAuth         |
+| Tool system   | Custom Tool / ToolRegistry framework |
 
 ---
 
-## Architecture Rules
+## Development Notes
 
-```
-src/core/      ← Shared lib. May NOT import from aca or assistant.
-src/aca/       ← Coding agent. Imports from core ONLY.
-src/assistant/ ← General chatbot. Imports from core ONLY.
-```
+Run the architecture boundary check before committing:
 
-Enforce before committing:
 ```bash
 python scripts/check_imports.py
 ```
 
-Agents collaborate via MCP at runtime — never import each other.
+Package boundaries:
+
+```text
+src/core/       Shared infrastructure. Should not import from assistant or aca.
+src/assistant/  Assistant agent. May import from core.
+src/aca/        Coding-agent prototype. May import from core.
+```
 
 ---
 
-## Configuration
+## Current Limitations
 
-Configuration priority (highest to lowest):
-1. Shell environment variables (`ACA_*` prefixed)
-2. `.env` file in project root
-3. `.agent-config.yml` in project root
-4. Built-in defaults in `core/config.py`
+This project is under active development and is currently optimized for personal use and experimentation.
 
-## Key Tech
+Known limitations:
 
-| Component     | Choice                      |
-|---------------|-----------------------------|
-| LLM           | DeepSeek V4 Pro (reasoning) |
-| Python server | FastAPI + uvicorn           |
-| Frontend      | Next.js + assistant-ui      |
-| Chat UI       | ExternalStoreRuntime        |
-| Database      | SQLite (auth, threads)      |
-| Auth          | Email/Password + Google OAuth |
+* The assistant agent is the main working application; the coding agent is still an early prototype.
+* MCP integration is not currently implemented.
+* Adaptive context compaction is still being improved.
+* Test coverage and production hardening are not yet complete.
+* There is no admin dashboard for reviewing feedback or LLM usage logs.
+
+---
+
+## Roadmap
+
+Short-term:
+
+* Improve memory retrieval and deduplication
+* Continue refining prompt/context management
+* Add more useful assistant tools and skills
+* Add tests for core backend flows
+
+Longer-term:
+
+* Experiment with orchestrator-led and multi-agent architectures
+* Expand the coding-agent prototype after the assistant foundation is stronger
+* Explore MCP or another integration protocol for future agents/tools
+* Support more model providers or local models

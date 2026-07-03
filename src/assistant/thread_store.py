@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from assistant.models import ThreadState, ConversationMessage
+from assistant.models import ThreadState, ConversationMessage, LlmCallLog
 
 logger = logging.getLogger(__name__)
 
@@ -158,3 +158,52 @@ async def get_messages_in_range(
         query = query.where(ConversationMessage.id <= until_message_id)
     result = await db.execute(query)
     return [m.to_dict() for m in result.scalars().all()]
+
+
+# ── LLM Call Logs ─────────────────────────────────────────────────────────
+
+
+async def save_llm_call_log(
+    db: AsyncSession,
+    *,
+    request_id: str,
+    thread_id: str,
+    user_id: int,
+    turn: int,
+    model: str,
+    provider: str,
+    messages_count: int,
+    tools_count: int,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    cached_tokens: int | None = None,
+    finish_reason: str | None = None,
+    latency_ms: int | None = None,
+    has_reasoning: bool = False,
+    has_tool_calls: bool = False,
+    error: str | None = None,
+) -> LlmCallLog:
+    log = LlmCallLog(
+        request_id=request_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        turn=turn,
+        model=model,
+        provider=provider,
+        messages_count=messages_count,
+        tools_count=tools_count,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cached_tokens=cached_tokens,
+        finish_reason=finish_reason,
+        latency_ms=latency_ms,
+        has_reasoning=has_reasoning,
+        has_tool_calls=has_tool_calls,
+        error=error,
+    )
+    db.add(log)
+    await db.commit()
+    await db.refresh(log)
+    return log

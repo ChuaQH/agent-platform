@@ -31,6 +31,8 @@ class ReadFileTool(Tool):
         "Returns the file content as text. Large files are truncated. "
         "The workspace root is the project's agent-data/workspace directory."
     )
+    when_to_use = "To read the contents of a file from the workspace."
+    how_to_use = "Provide a relative path to the file within the workspace."
     parameters = {
         "type": "object",
         "properties": {
@@ -84,6 +86,8 @@ class WriteFileTool(Tool):
         "⚠️ This overwrites existing files — use with care. "
         "Set 'confirmed' to true to proceed."
     )
+    when_to_use = "When the user asks to save or write content to a file. Requires user confirmation."
+    how_to_use = "Provide the file path, content, and set confirmed=true to actually write."
     parameters = {
         "type": "object",
         "properties": {

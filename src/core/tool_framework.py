@@ -31,6 +31,8 @@ class Tool(ABC):
     name: str = ""
     description: str = ""
     parameters: dict[str, Any] = {}
+    when_to_use: str | None = None
+    how_to_use: str | None = None
 
     @abstractmethod
     async def execute(self, **params: Any) -> str:
@@ -85,6 +87,22 @@ class ToolRegistry:
     def to_openai_schemas(self) -> list[dict[str, Any]]:
         """Export all tools as OpenAI-compatible function definitions."""
         return [tool.to_openai_schema() for tool in self._tools.values()]
+
+    def compile_tool_use_policy(self) -> str:
+        """Compile all registered tools' when_to_use and how_to_use into a prompt section."""
+        when_lines: list[str] = []
+        how_lines: list[str] = []
+        for tool in self._tools.values():
+            if tool.when_to_use:
+                when_lines.append(f"- **{tool.name}**: {tool.when_to_use}")
+            if tool.how_to_use:
+                how_lines.append(f"- **{tool.name}**: {tool.how_to_use}")
+        parts: list[str] = []
+        if when_lines:
+            parts.append("When to use tools:\n" + "\n".join(when_lines))
+        if how_lines:
+            parts.append("How to use tools:\n" + "\n".join(how_lines))
+        return "\n\n".join(parts) if parts else ""
 
     @property
     def tool_names(self) -> list[str]:

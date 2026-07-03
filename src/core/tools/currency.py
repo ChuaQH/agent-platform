@@ -19,6 +19,8 @@ class CurrencyTool(Tool):
         "Currency codes are 3-letter ISO codes like USD, EUR, GBP, JPY, SGD. "
         'Example: amount=100, from="USD", to="EUR"'
     )
+    when_to_use = "To convert between currencies using live exchange rates."
+    how_to_use = "Provide amount, source currency (3-letter ISO code), and target currency (3-letter ISO code)."
     parameters = {
         "type": "object",
         "properties": {

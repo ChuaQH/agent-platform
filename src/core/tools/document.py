@@ -19,6 +19,8 @@ class ExtractTextTool(Tool):
         "Supports PDF (.pdf) and plain text (.txt, .md, .py, etc.) files. "
         "Provide the relative path to the file."
     )
+    when_to_use = "To extract readable text from PDF or text files in the workspace."
+    how_to_use = "Provide a relative path to the file within the workspace."
     parameters = {
         "type": "object",
         "properties": {
@@ -79,6 +81,8 @@ class ReadSpreadsheetTool(Tool):
         "Supports .xlsx, .xlsm, and .csv formats. "
         "Returns a summary with row count and column headers, plus the data."
     )
+    when_to_use = "To read and summarize data from spreadsheet files (.xlsx, .csv)."
+    how_to_use = "Provide a relative path to the spreadsheet within the workspace."
     parameters = {
         "type": "object",
         "properties": {

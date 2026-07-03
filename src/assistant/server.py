@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
 
 from core.config import Config
 
@@ -48,9 +50,12 @@ from assistant.tools.web_search import WebSearchTool
 from assistant.tools.web_fetch import WebFetchTool
 from assistant.tools.personal_memory import RememberTool, RecallTool
 from assistant.memory.personal import PersonalMemory
+from assistant.context_builder import ContextBuilder
 from assistant import auth
 from assistant import thread_store
-from core.db import init_engine, get_session
+from core.db import init_engine, get_session, session_context
+
+from assistant.models import Feedback, LlmCallLog
 
 logger = logging.getLogger(__name__)
 
@@ -83,50 +88,34 @@ class UpdateTitleRequest(BaseModel):
     title: str
 
 
+class FeedbackRequest(BaseModel):
+    feedback_text: str
+    message_id: int
+
+
 # ── Config ─────────────────────────────────────────────────────────────────
 
 config = Config(project_root=Path(__file__).resolve().parent.parent.parent)
 
 # ── System prompt ─────────────────────────────────────────────────────────
 
-ASSISTANT_SYSTEM_PROMPT = """\
-You are a helpful AI assistant with access to tools for web search, calculations, datetime utilities, and memory.
+SYSTEM_PROMPT = """\
+You are a general-use chatbot agent.
 
-Your capabilities:
-- **Web search**: You can search the web for current information when you need facts or data beyond your training.
-- **Web fetch**: You can read the contents of a specific URL for detailed information.
-- **Calculator**: You can evaluate mathematical expressions accurately.
-- **Date/time**: You can get the current datetime, the user's timezone, locale, and perform date arithmetic (e.g. "3 days from now").
-- **Location**: You can get the user's approximate location for context-aware responses.
-- **Currency**: You can convert between currencies using live exchange rates.
-- **Weather**: You can get current weather and a 3-day forecast for any location.
-- **Memory**: You can remember facts about the user and recall them later.
+Your job is to help the user accomplish tasks accurately, safely, and efficiently.
 
-Guidelines:
-- Be concise and helpful.
-- Use web search when you need current or factual information you're unsure about.
-- Use the calculator for math rather than doing it in your head.
-- Use datetime tools when asked about time, dates, or scheduling.
-- When a user tells you something about themselves (name, preferences, projects), use the memory tools to remember it.
-- When starting a conversation, recall what you know about the user.
-- If you don't know something, search for it rather than guessing.
+Use the conversation context, available memories, retrieved sources, and tools when they are relevant. Do not use tools unnecessarily.
+
+Do not treat assistant_response_preferences as factual user memory. They only describe how the assistant should respond. When user-specific facts, preferences, prior decisions, projects, locations, or history may matter, search user/context memories or ask the user if needed.
+
+When using external, current, or source-specific information, rely on retrieval or web/document tools rather than guessing.
+
+For actions that affect external systems, private data, messages, files, purchases, bookings, accounts, or irreversible changes, require user confirmation unless the action has already been clearly authorized.
+
+Be honest about uncertainty, missing information, tool failures, and assumptions.
+
+Prefer clear, practical answers. Follow the user's latest instruction unless it conflicts with safety, permissions, or higher-priority instructions.
 """
-
-
-def _get_response_preferences_prompt() -> str:
-    prefs = config.response_preferences
-    return f"""Assistant response preferences:
-- Use {prefs.get('verbosity', 'balanced')} detail.
-- Use a {prefs.get('tone', 'direct')}, {prefs.get('structure', 'organized')} style.
-- Prefer {prefs.get('explanation_depth', 'practical')} explanations.
-- Use examples when {prefs.get('examples', 'when_useful')}.
-- Use tables when {prefs.get('tables', 'when_comparing')}.
-- Give {prefs.get('recommendations', 'clear_with_tradeoffs')} recommendations.
-- Ask clarifying questions {prefs.get('clarifying_questions', 'only_when_needed')}.
-- Cite sources when {prefs.get('citations', 'when_researching')}.
-
-Important:
-These preferences describe response style only. They are not a complete profile of the user's factual preferences, interests, projects, or history. Search user/context memories when user-specific facts may be relevant."""
 
 
 # ── App factory ───────────────────────────────────────────────────────────
@@ -356,6 +345,38 @@ async def create_thread(
     return await thread_store.create_thread(db, user_id, req.title)
 
 
+async def _get_thread_usage_summary(db: AsyncSession, thread_id: str) -> str | None:
+    result = await db.execute(
+        select(
+            func.count().label("turns"),
+            func.coalesce(func.sum(LlmCallLog.total_tokens), 0).label("total_tokens"),
+            func.coalesce(func.sum(LlmCallLog.cached_tokens), 0).label("cached_tokens"),
+            func.coalesce(func.sum(LlmCallLog.latency_ms), 0).label("total_latency_ms"),
+        ).where(LlmCallLog.thread_id == thread_id)
+    )
+    row = result.one()
+    turns = row.turns
+    total_tokens = row.total_tokens
+    cached = row.cached_tokens
+    latency_ms = row.total_latency_ms
+
+    if turns == 0:
+        return None
+
+    parts = [f"{turns} turn{'s' if turns > 1 else ''}"]
+    if total_tokens >= 1000:
+        parts.append(f"{total_tokens / 1000:.1f}K tokens")
+    elif total_tokens > 0:
+        parts.append(f"{total_tokens} tokens")
+    if latency_ms >= 1000:
+        parts.append(f"{latency_ms / 1000:.1f}s")
+    elif latency_ms > 0:
+        parts.append(f"{latency_ms}ms")
+    if cached > 0:
+        parts.append(f"{cached} cached")
+    return " · ".join(parts)
+
+
 @app.get("/api/threads/{thread_id}")
 async def get_thread(
     request: Request,
@@ -367,7 +388,8 @@ async def get_thread(
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
     messages = await thread_store.get_messages(db, thread_id)
-    return {"thread": thread, "messages": messages}
+    usage = await _get_thread_usage_summary(db, thread_id)
+    return {"thread": thread, "messages": messages, "usage": usage}
 
 
 @app.delete("/api/threads/{thread_id}")
@@ -393,6 +415,55 @@ async def update_thread_title(
     if not result:
         raise HTTPException(status_code=404, detail="Thread not found")
     return result
+
+
+# ── Feedback endpoint ────────────────────────────────────────────────────
+
+
+@app.post("/api/threads/{thread_id}/feedback")
+async def submit_feedback(
+    request: Request,
+    thread_id: str,
+    req: FeedbackRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await _get_user(request, db)
+    user_id = user["id"]
+
+    messages = await thread_store.get_messages(db, thread_id)
+    if not messages:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    found = any(m["id"] == req.message_id and m["role"] == "assistant" for m in messages)
+    if not found:
+        raise HTTPException(status_code=404, detail="Message not found in thread")
+
+    raw_snapshot = [
+        {k: v for k, v in m.items() if k != "embedding"}
+        for m in messages
+    ]
+
+    context_builder = ContextBuilder(config)
+    compacted = await context_builder.build_context(
+        db=db,
+        system_instructions=SYSTEM_PROMPT,
+        tool_policy="",
+        user_id=user_id,
+        thread_id=thread_id,
+    )
+
+    feedback = Feedback(
+        thread_id=thread_id,
+        user_id=user_id,
+        message_id=req.message_id,
+        feedback_text=req.feedback_text,
+        raw_context_snapshot=raw_snapshot,
+        compacted_context_snapshot=compacted,
+    )
+    db.add(feedback)
+    await db.commit()
+
+    return {"ok": True}
 
 
 # ── Title generation helper ───────────────────────────────────────────────
@@ -457,11 +528,21 @@ async def chat(
     async def event_stream():
         llm = LLMClient(config)
         tools = _build_tool_registry(user_id, db)
+        context_builder = ContextBuilder(config, llm)
+
+        await context_builder.compact_if_needed(db, user["id"], thread_id)
+        tool_policy = tools.compile_tool_use_policy()
+
+        static_prefix = await context_builder.build_static_prefix(
+            db=db,
+            system_instructions=SYSTEM_PROMPT,
+            tool_policy=tool_policy,
+            user_id=user["id"],
+            thread_id=thread_id,
+        )
+
         conversation = Conversation()
-        conversation.set_static_prefix([
-            ASSISTANT_SYSTEM_PROMPT,
-            _get_response_preferences_prompt(),
-        ])
+        conversation.set_static_prefix(static_prefix)
 
         for msg in req.messages:
             role = msg.get("role", "")
@@ -498,12 +579,48 @@ async def chat(
         assistant_content_parts: list[str] = []
         all_reasoning: list[str] = []
         total_turns = 0
+        request_id = uuid.uuid4().hex[:12]
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_cached_tokens = 0
+        total_latency_ms = 0
 
         for turn in range(max_turns):
             total_turns = turn + 1
+            turn_start = time.monotonic()
             response = await llm.chat(
                 messages=conversation.get_messages_for_api(),
                 tools=tools.to_openai_schemas(),
+            )
+            latency_ms = int((time.monotonic() - turn_start) * 1000)
+            total_latency_ms += latency_ms
+
+            usage = response.usage if hasattr(response, "usage") and response.usage else {}
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            cached_tokens = usage.get("cached_tokens", 0)
+            total_prompt_tokens += prompt_tokens
+            total_completion_tokens += completion_tokens
+            total_cached_tokens += cached_tokens
+
+            await thread_store.save_llm_call_log(
+                db,
+                request_id=request_id,
+                thread_id=thread_id,
+                user_id=user["id"],
+                turn=total_turns,
+                model=config.llm_model,
+                provider=config.llm_provider,
+                messages_count=len(conversation.messages),
+                tools_count=len(tools),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=usage.get("total_tokens") or (prompt_tokens + completion_tokens) or None,
+                cached_tokens=cached_tokens,
+                finish_reason=response.finish_reason if hasattr(response, "finish_reason") else None,
+                latency_ms=latency_ms,
+                has_reasoning=bool(response.reasoning_content and response.reasoning_content.strip()),
+                has_tool_calls=bool(response.tool_calls),
             )
 
             logger.info(
@@ -521,6 +638,11 @@ async def chat(
                     "text": reasoning_text,
                     "turn": turn + 1,
                 })
+
+                await thread_store.save_message(
+                    db, thread_id, user["id"], "assistant",
+                    reasoning=reasoning_text,
+                )
 
             if response.content and not response.tool_calls:
                 conversation.add_assistant_message(content=response.content)
@@ -576,12 +698,6 @@ async def chat(
 
             break
 
-        if all_reasoning:
-            await thread_store.save_message(
-                db, thread_id, user["id"], "assistant",
-                reasoning="\n\n".join(all_reasoning),
-            )
-
         if assistant_content_parts:
             await thread_store.save_message(
                 db, thread_id, user["id"], "assistant",
@@ -589,9 +705,12 @@ async def chat(
             )
 
         yield _sse("usage", {
-            "prompt_tokens": response.usage.get("prompt_tokens", 0) if hasattr(response, 'usage') else 0,
-            "completion_tokens": response.usage.get("completion_tokens", 0) if hasattr(response, 'usage') else 0,
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_prompt_tokens + total_completion_tokens,
+            "cached_tokens": total_cached_tokens,
             "turns": total_turns,
+            "latency_ms": total_latency_ms,
         })
 
         if is_new_thread and first_user_msg:
@@ -643,7 +762,7 @@ async def startup():
     from assistant.models import (
         User, Session, ThreadState, ConversationMessage, CompactionCheckpoint,
     )
-    async with get_session() as session:
+    async with session_context() as session:
         async with session.bind.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables ensured.")

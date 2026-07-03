@@ -20,6 +20,8 @@ class RememberTool(Tool):
         "Categories: preference (likes/dislikes), personal (name, location), "
         "project (what they're working on), note (general fact)."
     )
+    when_to_use = "When the user explicitly shares a fact, preference, decision, or personal detail to remember for future conversations."
+    how_to_use = "Provide the fact, a category, and memory_type ('user' or 'context')."
     parameters = {
         "type": "object",
         "properties": {
@@ -34,7 +36,7 @@ class RememberTool(Tool):
             },
             "memory_type": {
                 "type": "string",
-                "enum": ["user", "context"],
+                "enum": ["user", "context"],    
                 "default": "user",
                 "description": "Type of memory: 'user' for personal facts, 'context' for project context.",
             },
@@ -63,6 +65,8 @@ class RecallTool(Tool):
         "memory_type='context' to search project/task context, "
         "or omit memory_type to search both."
     )
+    when_to_use = "When searching for previously stored user facts or project context. Use at conversation start and when user-specific facts may matter."
+    how_to_use = "Provide a search query. Optionally filter by memory_type."
     parameters = {
         "type": "object",
         "properties": {

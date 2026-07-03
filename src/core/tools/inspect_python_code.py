@@ -46,6 +46,8 @@ class InspectPythonCodeTool(Tool):
         "Use focus=general|complexity|safety|structure|debugging and "
         "detail=compact|normal|full to control output."
     )
+    when_to_use = "To analyze, understand, or debug Python code by inspecting its structure, imports, and patterns."
+    how_to_use = "Provide the Python source code as a string with optional focus and detail parameters."
     parameters = {
         "type": "object",
         "properties": {

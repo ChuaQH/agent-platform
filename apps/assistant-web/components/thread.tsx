@@ -10,6 +10,7 @@ import { Reasoning } from "@/components/reasoning";
 import { ThinkingAccordion } from "@/components/thinking-accordion";
 import { ToolFallback } from "@/components/tool-fallback";
 import { TooltipIconButton } from "@/components/tooltip-icon-button";
+import { FeedbackDialog } from "@/components/feedback-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -323,6 +324,8 @@ const AssistantMessage: FC = () => {
     ReasoningGroup,
   } = useContext(ThreadComponentsContext);
 
+  const isMessageStreaming = useAuiState((s) => s.message.status?.type === "running");
+
   // reserves space for action bar and compensates with `-mb` for consistent msg spacing
   // keeps hovered action bar from shifting layout (autohide doesn't support absolute positioning well)
   // for pt-[n] use -mb-[n + 6] & min-h-[n + 6] to preserve compensation
@@ -350,9 +353,8 @@ const AssistantMessage: FC = () => {
           {({ part, children }) => {
             switch (part.type) {
               case "group-chainOfThought": {
-                const running = part.status.type === "running";
                 return (
-                  <ThinkingAccordion streaming={running}>
+                  <ThinkingAccordion streaming={isMessageStreaming}>
                     {children}
                   </ThinkingAccordion>
                 );
@@ -363,16 +365,7 @@ const AssistantMessage: FC = () => {
                 }
                 return <div className="space-y-2 px-4 py-3">{children}</div>;
               case "group-reasoning": {
-                if (ReasoningGroup) {
-                  return (
-                    <ReasoningGroup group={part}>{children}</ReasoningGroup>
-                  );
-                }
-                return (
-                  <div className="text-muted-foreground space-y-2 px-4 py-3 text-sm">
-                    {children}
-                  </div>
-                );
+                return <>{children}</>;
               }
               case "text":
                 return <MarkdownText />;
@@ -432,6 +425,7 @@ const AssistantActionBar: FC = () => {
           <RefreshCwIcon />
         </TooltipIconButton>
       </ActionBarPrimitive.Reload>
+      <FeedbackDialog />
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
           <TooltipIconButton

@@ -29,6 +29,8 @@ class WebSearchTool(Tool):
         "changed since your training cutoff, or when you need to verify "
         "something you're unsure about."
     )
+    when_to_use = "When you need current information, news, facts, or data beyond your training cutoff."
+    how_to_use = "Provide a specific, targeted search query."
     parameters = {
         "type": "object",
         "properties": {

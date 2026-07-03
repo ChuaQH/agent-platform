@@ -60,6 +60,8 @@ class CurrentDatetimeTool(Tool):
         "If omitted, uses the system's local timezone. "
         "Returns ISO 8601 formatted datetime with timezone."
     )
+    when_to_use = "When you need the current date and/or time."
+    how_to_use = "Optionally provide an IANA timezone name (e.g., 'America/New_York')."
     parameters = {
         "type": "object",
         "properties": {
@@ -91,6 +93,8 @@ class UserTimezoneTool(Tool):
         "Accepts an optional IANA timezone to validate. "
         "If omitted, auto-detects from the system."
     )
+    when_to_use = "When you need to know the user's timezone for time calculations or scheduling."
+    how_to_use = "No arguments required. Returns IANA timezone name and UTC offset."
     parameters = {
         "type": "object",
         "properties": {
@@ -120,6 +124,8 @@ class UserTimezoneTool(Tool):
 class UserLocaleTool(Tool):
     name = "get_user_locale"
     description = "Get the user's system locale."
+    when_to_use = "When you need the user's locale for formatting dates, numbers, or currency."
+    how_to_use = "No arguments required. Returns a locale string (e.g., 'en_US')."
     parameters = {
         "type": "object",
         "properties": {},
@@ -140,6 +146,8 @@ class DateMathTool(Tool):
         "'next Monday/Friday', 'last Monday', 'first day of next month', "
         "'last day of month', and combinations like '3 days from now'."
     )
+    when_to_use = "To calculate a date relative to another (e.g., '3 days from now', 'next Monday')."
+    how_to_use = "Provide a natural language date expression. Optionally specify an IANA timezone."
     parameters = {
         "type": "object",
         "properties": {

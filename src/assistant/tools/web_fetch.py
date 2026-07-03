@@ -25,6 +25,8 @@ class WebFetchTool(Tool):
         "Use this after web_search to read a specific page in detail. "
         "Returns the page content as plain text."
     )
+    when_to_use = "To read the full content of a URL after finding it via web_search, or when the user provides a URL."
+    how_to_use = "Provide the complete URL including protocol (https://...)."
     parameters = {
         "type": "object",
         "properties": {

@@ -117,6 +117,8 @@ class UnitConvertTool(Tool):
         'Provide the amount and source/target units (e.g. amount=5, from="miles", to="km"). '
         "For temperature, use 'C', 'F', or 'K'."
     )
+    when_to_use = "To convert between units of measurement (length, weight, temperature, volume, speed, data, etc.)."
+    how_to_use = "Provide amount, source unit, and target unit (e.g., amount=5, from='miles', to='km')."
     parameters = {
         "type": "object",
         "properties": {

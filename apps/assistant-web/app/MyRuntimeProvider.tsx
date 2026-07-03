@@ -9,6 +9,8 @@ import {
 } from "@assistant-ui/react";
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useThreadListAdapter, ThreadListRefreshContext } from "@/lib/thread-list-adapter";
+import { BackendMessageIdContext } from "@/lib/backend-ids";
+import { ThreadIdContext } from "@/lib/thread-id";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -36,6 +38,7 @@ export function MyRuntimeProvider({
   const [threadId, setThreadId] = useState<string | null>(null);
   const [initialLoading, setInitialLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const [backendIds, setBackendIds] = useState<Map<string, number>>(new Map());
   const currentThreadIdRef = useRef<string | null>(null);
 
   const onSwitchToNewThread = useCallback(() => {
@@ -58,39 +61,95 @@ export function MyRuntimeProvider({
         if (!res.ok) throw new Error("Failed to load thread");
         const data = await res.json();
         const msgs: ThreadMessageLike[] = [];
+        const newIds = new Map<string, number>();
         for (let i = 0; i < (data.messages || []).length; i++) {
           const m = data.messages[i];
+
+          if (m.role === "tool") {
+            if (msgs.length > 0) {
+              const lastIdx = msgs.length - 1;
+              const last = msgs[lastIdx];
+              if (last.role === "assistant") {
+                const merged = [
+                  ...(Array.isArray(last.content) ? last.content : []),
+                  {
+                    type: "tool-call",
+                    toolCallId: m.tool_call_id || "",
+                    toolName: m.tool_name || "",
+                    args: m.tool_result?.arguments || {},
+                    result: m.tool_result?.result,
+                    status: { type: "complete" },
+                  },
+                ] as AnyPart[];
+                msgs[lastIdx] = {
+                  ...last,
+                  content: merged as unknown as ThreadMessageLike["content"],
+                } as ThreadMessageLike;
+              }
+            }
+            continue;
+          }
+
+          if (m.role === "user") {
+            const fid = nextId();
+            newIds.set(fid, m.id);
+            msgs.push({
+              id: fid,
+              role: "user",
+              content: [{ type: "text", text: m.content || "" }] as unknown as ThreadMessageLike["content"],
+              parentId: msgs.length === 0 ? null : msgs[msgs.length - 1]?.id ?? null,
+            } as ThreadMessageLike);
+            continue;
+          }
+
           const parts: AnyPart[] = [];
 
           if (m.reasoning) {
             parts.push({ type: "reasoning", text: m.reasoning });
           }
 
-          if (m.role === "tool") {
-            parts.push({
-              type: "tool-call",
-              toolCallId: m.tool_call_id || "",
-              toolName: m.tool_name || "",
-              args: m.tool_result?.arguments || {},
-              result: m.tool_result?.result,
-              status: { type: "complete" },
-            });
-          }
-
           if (m.content) {
             parts.push({ type: "text", text: m.content });
           }
 
-          if (parts.length > 0) {
+          if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
+            const lastIdx = msgs.length - 1;
+            const last = msgs[lastIdx];
+            const merged = [
+              ...(Array.isArray(last.content) ? last.content : []),
+              ...parts,
+            ] as AnyPart[];
+            newIds.set(last.id, m.id);
+            msgs[lastIdx] = {
+              ...last,
+              content: merged as unknown as ThreadMessageLike["content"],
+            } as ThreadMessageLike;
+          } else if (parts.length > 0) {
+            const fid = nextId();
+            newIds.set(fid, m.id);
             msgs.push({
-              id: nextId(),
-              role: m.role as "user" | "assistant",
+              id: fid,
+              role: "assistant",
               content: parts as unknown as ThreadMessageLike["content"],
-              parentId: i === 0 ? null : msgs[msgs.length - 1]?.id ?? null,
+              parentId: msgs.length === 0 ? null : msgs[msgs.length - 1]?.id ?? null,
             } as ThreadMessageLike);
           }
         }
+        if (data.usage && msgs.length > 0) {
+          const last = msgs[msgs.length - 1];
+          if (last.role === "assistant") {
+            const merged = [
+              ...(Array.isArray(last.content) ? last.content : []),
+              { type: "text", text: `\n\n> ${data.usage}` },
+            ] as AnyPart[];
+            msgs[msgs.length - 1] = {
+              ...last,
+              content: merged as unknown as ThreadMessageLike["content"],
+            } as ThreadMessageLike;
+          }
+        }
         setMessages(msgs);
+        setBackendIds(newIds);
       } catch {
         // ignore
       } finally {
@@ -249,6 +308,30 @@ export function MyRuntimeProvider({
                   });
                   break;
                 }
+                case "usage": {
+                  const tokens = event.total_tokens
+                    ? event.total_tokens >= 1000
+                      ? `${(event.total_tokens / 1000).toFixed(1)}K`
+                      : String(event.total_tokens)
+                    : "";
+                  const time = event.latency_ms
+                    ? event.latency_ms >= 1000
+                      ? `${(event.latency_ms / 1000).toFixed(1)}s`
+                      : `${event.latency_ms}ms`
+                    : "";
+                  const parts = [];
+                  if (event.turns) parts.push(`${event.turns} turn${event.turns > 1 ? "s" : ""}`);
+                  if (tokens) parts.push(`${tokens} tokens`);
+                  if (time) parts.push(time);
+                  if (event.cached_tokens > 0) parts.push(`${event.cached_tokens} cached`);
+                  const summary = parts.join(" · ");
+                  if (summary) {
+                    updateAssistant((content) => {
+                      content.push({ type: "text", text: `\n\n> ${summary}` });
+                    });
+                  }
+                  break;
+                }
                 case "done": {
                   setMessages((prev) =>
                     prev.map((m) =>
@@ -266,6 +349,25 @@ export function MyRuntimeProvider({
         }
 
         threadList.refresh();
+
+        if (currentThreadIdRef.current) {
+          const tid = currentThreadIdRef.current;
+          const tok = getToken();
+          fetch(`${API_URL}/api/threads/${tid}`, {
+            headers: tok ? { Authorization: `Bearer ${tok}` } : {},
+          })
+            .then((res) => res.json())
+            .then((data) => {
+              const bmsgs = (data.messages || []) as { id: number; role: string; content: string | null }[];
+              for (let i = bmsgs.length - 1; i >= 0; i--) {
+                if (bmsgs[i].role === "assistant" && bmsgs[i].content) {
+                  setBackendIds((ids) => new Map(ids).set(assistantId, bmsgs[i].id));
+                  break;
+                }
+              }
+            })
+            .catch(() => {});
+        }
       } catch (err: unknown) {
         if (err instanceof Error && err.name === "AbortError") {
           setMessages((prev) =>
@@ -362,7 +464,11 @@ export function MyRuntimeProvider({
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ThreadListRefreshContext.Provider value={threadList.refresh}>
-        {children}
+        <BackendMessageIdContext.Provider value={backendIds}>
+          <ThreadIdContext.Provider value={threadId}>
+            {children}
+          </ThreadIdContext.Provider>
+        </BackendMessageIdContext.Provider>
       </ThreadListRefreshContext.Provider>
     </AssistantRuntimeProvider>
   );

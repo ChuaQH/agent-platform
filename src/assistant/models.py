@@ -98,6 +98,7 @@ class ThreadState(Base):
 
     def to_dict(self) -> dict:
         return {
+            "id": self.thread_id,
             "thread_id": self.thread_id,
             "user_id": self.user_id,
             "title": self.title,
@@ -237,4 +238,86 @@ class Memory(Base):
             "source_thread_id": self.source_thread_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class LlmCallLog(Base):
+    __tablename__ = "llm_call_logs"
+    __table_args__ = (
+        Index("idx_llm_logs_thread", "thread_id", "created_at"),
+        Index("idx_llm_logs_user", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    thread_id: Mapped[str] = mapped_column(String, ForeignKey("thread_state.thread_id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    turn: Mapped[int] = mapped_column(Integer, nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    messages_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    tools_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    finish_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    has_reasoning: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_tool_calls: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=lambda: datetime.now(timezone.utc)
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "request_id": self.request_id,
+            "thread_id": self.thread_id,
+            "user_id": self.user_id,
+            "turn": self.turn,
+            "model": self.model,
+            "provider": self.provider,
+            "messages_count": self.messages_count,
+            "tools_count": self.tools_count,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "cached_tokens": self.cached_tokens,
+            "finish_reason": self.finish_reason,
+            "latency_ms": self.latency_ms,
+            "has_reasoning": self.has_reasoning,
+            "has_tool_calls": self.has_tool_calls,
+            "error": self.error,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class Feedback(Base):
+    __tablename__ = "feedback"
+    __table_args__ = (
+        Index("idx_feedback_thread", "thread_id"),
+        Index("idx_feedback_user", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    thread_id: Mapped[str] = mapped_column(String, ForeignKey("thread_state.thread_id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    message_id: Mapped[int] = mapped_column(Integer, ForeignKey("conversation_messages.id"), nullable=False)
+    feedback_text: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_context_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    compacted_context_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=lambda: datetime.now(timezone.utc)
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "thread_id": self.thread_id,
+            "user_id": self.user_id,
+            "message_id": self.message_id,
+            "feedback_text": self.feedback_text,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }

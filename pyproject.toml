@@ -46,7 +46,6 @@ docs = [
 
 [project.scripts]
 aca = "aca.cli.main:app"
-assistant = "assistant.cli:main"
 assistant-server = "assistant.server:app"
 
 [tool.hatch.build.targets.wheel]

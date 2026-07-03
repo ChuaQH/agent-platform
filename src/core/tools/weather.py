@@ -50,6 +50,8 @@ class WeatherTool(Tool):
         "Otherwise accepts optional latitude/longitude parameters. "
         "Set location_name to label the result (e.g. 'Singapore')."
     )
+    when_to_use = "For current weather conditions or a multi-day forecast for any location."
+    how_to_use = "Provide latitude and longitude, or a location_name string. Uses cached user location if omitted."
     parameters = {
         "type": "object",
         "properties": {

@@ -10,7 +10,7 @@ Usage:
 """
 
 from core.db.base import Base, TimestampMixin
-from core.db.engine import close_engine, get_engine, get_session, init_engine
+from core.db.engine import close_engine, get_engine, get_session, init_engine, session_context
 
 __all__ = [
     "Base",
@@ -18,5 +18,6 @@ __all__ = [
     "init_engine",
     "get_engine",
     "get_session",
+    "session_context",
     "close_engine",
 ]

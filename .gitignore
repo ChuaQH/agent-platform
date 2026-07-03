@@ -29,8 +29,17 @@ apps/*/.env.local
 
 # Personal Notes
 src/assistant/personal_notes.md
+PROJECT_BRIEF.md
 handover.md
 personal-notes.txt
+ARCHITECTURE.md
+src/aca/ARCHITECTURE.md
+src/aca/PLAN.md
+src/aca/ROADMAP.md
 
 # Files sent by user
 .files
+
+# Temp Files
+None-shm
+None-wal

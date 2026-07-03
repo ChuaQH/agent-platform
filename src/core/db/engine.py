@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -40,6 +41,15 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             yield session
         finally:
             await session.close()
+
+
+@asynccontextmanager
+async def session_context():
+    async for session in get_session():
+        try:
+            yield session
+        finally:
+            break
 
 
 async def close_engine() -> None:
