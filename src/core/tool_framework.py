@@ -65,6 +65,10 @@ class ToolRegistry:
         """Register a tool."""
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> None:
+        """Remove a registered tool by name."""
+        self._tools.pop(name, None)
+
     def register_many(self, tools: list[Tool]) -> None:
         """Register multiple tools at once."""
         for tool in tools:

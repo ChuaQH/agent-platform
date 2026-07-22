@@ -45,7 +45,7 @@ function LoginForm() {
     <div className="w-full max-w-sm space-y-6 p-8">
       <div className="text-center">
         <h1 className="text-2xl font-semibold text-foreground">
-          ACA Assistant
+          Assistant Agent
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
           {isRegister ? "Create your account" : "Sign in to continue"}

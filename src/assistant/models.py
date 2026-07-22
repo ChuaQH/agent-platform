@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -31,6 +32,8 @@ class User(Base):
     password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     google_id: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    skill_toggles = relationship("UserSkillToggle", back_populates="user", cascade="all, delete-orphan")
+    tool_toggles = relationship("UserToolToggle", back_populates="user", cascade="all, delete-orphan")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=lambda: datetime.now(timezone.utc)
     )
@@ -250,7 +253,7 @@ class LlmCallLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
-    thread_id: Mapped[str] = mapped_column(String, ForeignKey("thread_state.thread_id"), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String, ForeignKey("thread_state.thread_id", ondelete="CASCADE"), nullable=False)
     user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     turn: Mapped[int] = mapped_column(Integer, nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
@@ -294,6 +297,95 @@ class LlmCallLog(Base):
         }
 
 
+class Skill(Base):
+    __tablename__ = "skills"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    is_global: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    toggles = relationship("UserSkillToggle", back_populates="skill", cascade="all, delete-orphan")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "content": self.content,
+            "is_global": self.is_global,
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class UserSkillToggle(Base):
+    __tablename__ = "user_skill_toggles"
+    __table_args__ = (
+        UniqueConstraint("user_id", "skill_id", name="uq_user_skill"),
+        Index("idx_ust_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    skill_id: Mapped[int] = mapped_column(Integer, ForeignKey("skills.id"), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=lambda: datetime.now(timezone.utc)
+    )
+
+    user = relationship("User", back_populates="skill_toggles")
+    skill = relationship("Skill", back_populates="toggles")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "skill_id": self.skill_id,
+            "enabled": self.enabled,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class UserToolToggle(Base):
+    __tablename__ = "user_tool_toggles"
+    __table_args__ = (
+        UniqueConstraint("user_id", "tool_name", name="uq_user_tool"),
+        Index("idx_utt_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=lambda: datetime.now(timezone.utc)
+    )
+
+    user = relationship("User", back_populates="tool_toggles")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "tool_name": self.tool_name,
+            "enabled": self.enabled,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class Feedback(Base):
     __tablename__ = "feedback"
     __table_args__ = (
@@ -302,7 +394,7 @@ class Feedback(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    thread_id: Mapped[str] = mapped_column(String, ForeignKey("thread_state.thread_id"), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String, ForeignKey("thread_state.thread_id", ondelete="CASCADE"), nullable=False)
     user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     message_id: Mapped[int] = mapped_column(Integer, ForeignKey("conversation_messages.id"), nullable=False)
     feedback_text: Mapped[str] = mapped_column(Text, nullable=False)

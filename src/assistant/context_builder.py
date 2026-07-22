@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import Config
 from core.llm_client import LLMClient
-from assistant import thread_store
+from assistant import skill_store, thread_store
 from assistant.models import (
     CompactionCheckpoint,
     ConversationMessage,
@@ -142,6 +142,25 @@ class ContextBuilder:
     def _format_checkpoint_summary(self, summary: str) -> str:
         return f"Checkpoint summary:\n{summary}"
 
+    def _format_enabled_skills(self, skills: list[dict]) -> str:
+        if not skills:
+            return ""
+        lines = [
+            "## Enabled Skills",
+            "",
+            "You have the following skills available. Each skill provides guidance for specific tasks.",
+            "To use a skill's full instructions, call the `get_skill_content` tool with its name.",
+            "",
+        ]
+        for skill in skills:
+            lines.append(f"- **{skill['name']}**: {skill['description']}")
+        lines.append("")
+        lines.append(
+            "When a task matches a skill's purpose, apply that skill's guidance. "
+            "When no skill is relevant, respond normally."
+        )
+        return "\n".join(lines)
+
     async def build_static_prefix(
         self,
         db: AsyncSession,
@@ -158,6 +177,16 @@ class ContextBuilder:
         checkpoint = await self._get_latest_checkpoint(db, user_id, thread_id)
         if checkpoint and checkpoint.summary:
             parts.append(self._format_checkpoint_summary(checkpoint.summary))
+
+        enabled_skills = await skill_store.get_enabled_skills(db, user_id)
+        if enabled_skills:
+            skills_data = [
+                {"name": s.name, "description": s.description}
+                for s in enabled_skills
+            ]
+            skills_section = self._format_enabled_skills(skills_data)
+            if skills_section:
+                parts.append(skills_section)
 
         return parts
 

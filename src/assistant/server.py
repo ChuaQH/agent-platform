@@ -49,13 +49,16 @@ from core.tools.inspect_python_code import InspectPythonCodeTool
 from assistant.tools.web_search import WebSearchTool
 from assistant.tools.web_fetch import WebFetchTool
 from assistant.tools.personal_memory import RememberTool, RecallTool
+from assistant.tools.skill_content import GetSkillContentTool
 from assistant.memory.personal import PersonalMemory
 from assistant.context_builder import ContextBuilder
 from assistant import auth
 from assistant import thread_store
+from assistant import skill_store
+from assistant import tool_store
 from core.db import init_engine, get_session, session_context
 
-from assistant.models import Feedback, LlmCallLog
+from assistant.models import Feedback, LlmCallLog, Skill, UserSkillToggle
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +81,10 @@ class RegisterRequest(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[dict[str, Any]]
     thread_id: str | None = None
+
+
+class SkillToggleRequest(BaseModel):
+    enabled: bool
 
 
 class CreateThreadRequest(BaseModel):
@@ -121,7 +128,7 @@ Prefer clear, practical answers. Follow the user's latest instruction unless it 
 # ── App factory ───────────────────────────────────────────────────────────
 
 
-app = FastAPI(title="ACA Assistant API")
+app = FastAPI(title="Assistant Agent API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -165,6 +172,7 @@ def _build_tool_registry(user_id: str, db: AsyncSession) -> ToolRegistry:
     registry.register(InspectPythonCodeTool())
     registry.register(RememberTool(personal_memory, user_id=user_id))
     registry.register(RecallTool(personal_memory, user_id=user_id))
+    registry.register(GetSkillContentTool(db=db, user_id=int(user_id)))
     return registry
 
 
@@ -466,6 +474,56 @@ async def submit_feedback(
     return {"ok": True}
 
 
+# ── Skill endpoints ────────────────────────────────────────────────────────
+
+
+@app.get("/api/skills")
+async def list_skills(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await _get_user(request, db)
+    return await skill_store.get_skills_with_toggles(db, user["id"])
+
+
+@app.put("/api/skills/{skill_id}/toggle")
+async def toggle_skill(
+    request: Request,
+    skill_id: int,
+    req: SkillToggleRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await _get_user(request, db)
+    await skill_store.set_skill_toggle(db, user["id"], skill_id, req.enabled)
+    return {"ok": True}
+
+
+# ── Tool endpoints ─────────────────────────────────────────────────────────
+
+
+@app.get("/api/tools")
+async def list_tools(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await _get_user(request, db)
+    return await tool_store.get_tools_with_toggles(db, user["id"])
+
+
+@app.put("/api/tools/{tool_name}/toggle")
+async def toggle_tool(
+    request: Request,
+    tool_name: str,
+    req: SkillToggleRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await _get_user(request, db)
+    ok = await tool_store.set_tool_toggle(db, user["id"], tool_name, req.enabled)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
+    return {"ok": True}
+
+
 # ── Title generation helper ───────────────────────────────────────────────
 
 
@@ -528,6 +586,10 @@ async def chat(
     async def event_stream():
         llm = LLMClient(config)
         tools = _build_tool_registry(user_id, db)
+        enabled_tool_names = await tool_store.get_enabled_tool_names(db, user["id"])
+        for name in list(tools.tool_names):
+            if name not in enabled_tool_names:
+                tools.unregister(name)
         context_builder = ContextBuilder(config, llm)
 
         await context_builder.compact_if_needed(db, user["id"], thread_id)
@@ -760,11 +822,13 @@ async def startup():
 
     from core.db.base import Base
     from assistant.models import (
-        User, Session, ThreadState, ConversationMessage, CompactionCheckpoint,
+        User, Session, ThreadState, ConversationMessage, CompactionCheckpoint, Skill, UserSkillToggle,
     )
     async with session_context() as session:
         async with session.bind.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+    async with session_context() as session:
+        await skill_store.seed_global_skills(session)
     logger.info("Database tables ensured.")
 
 

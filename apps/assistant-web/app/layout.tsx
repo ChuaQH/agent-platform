@@ -3,7 +3,7 @@ import { AuthProvider } from "@/lib/auth";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "ACA Assistant",
+  title: "Assistant Agent",
   description: "AI Assistant powered by DeepSeek",
 };
 
