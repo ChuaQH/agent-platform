@@ -103,6 +103,7 @@ async def save_message(
     tool_name: str | None = None,
     tool_call_id: str | None = None,
     tool_result: dict | None = None,
+    client_message_id: str | None = None,
 ) -> dict:
     now = datetime.now(timezone.utc)
     msg = ConversationMessage(
@@ -114,6 +115,7 @@ async def save_message(
         tool_name=tool_name,
         tool_call_id=tool_call_id,
         tool_result=tool_result,
+        client_message_id=client_message_id,
         created_at=now,
     )
     db.add(msg)
@@ -127,6 +129,25 @@ async def save_message(
     await db.commit()
     await db.refresh(msg)
     return msg.to_dict()
+
+
+async def get_message_by_client_id(
+    db: AsyncSession, thread_id: str, client_message_id: str
+) -> dict | None:
+    """Look up a message by its client-generated id within a thread.
+
+    Returns None when absent. The unique index on
+    ``(thread_id, client_message_id)`` remains the authoritative guard
+    against duplicate submissions racing past this read.
+    """
+    result = await db.execute(
+        select(ConversationMessage).where(
+            ConversationMessage.thread_id == thread_id,
+            ConversationMessage.client_message_id == client_message_id,
+        )
+    )
+    msg = result.scalar_one_or_none()
+    return msg.to_dict() if msg else None
 
 
 async def get_messages_after_checkpoint(

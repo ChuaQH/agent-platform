@@ -3,17 +3,20 @@
 Provides:
 - Auth endpoints (login, register, me, logout)
 - Thread CRUD (list, create, get, delete, update title)
-- Chat endpoint with SSE streaming (ReAct loop + tool calls)
+- Chat endpoint with SSE streaming (ReAct loop via AgentRunner + tool calls)
+
+The iterative agent loop lives in `assistant.agent_runner.AgentRunner`;
+this module owns HTTP concerns only: validation, auth, SSE wire format,
+and persistence coordination.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
-import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +24,9 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select, func, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 
 from core.config import Config
 
@@ -37,6 +41,8 @@ except ImportError:
 from core.llm_client import LLMClient
 from core.conversation import Conversation
 from core.tool_framework import ToolRegistry
+from assistant.agent_runner import AgentRunner
+from assistant.chat_stream import stream_agent_events
 from core.tools.calculator import CalculatorTool
 from core.tools.datetime_tools import CurrentDatetimeTool, UserTimezoneTool, UserLocaleTool, DateMathTool
 from core.tools.user_location import UserLocationTool
@@ -56,9 +62,8 @@ from assistant import auth
 from assistant import thread_store
 from assistant import skill_store
 from assistant import tool_store
-from core.db import init_engine, get_session, session_context
-
-from assistant.models import Feedback, LlmCallLog, Skill, UserSkillToggle
+from core.db import init_engine, get_session, get_engine, session_context, close_engine
+from assistant.models import Feedback, LlmCallLog
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +86,10 @@ class RegisterRequest(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[dict[str, Any]]
     thread_id: str | None = None
+    # Stable client-generated id of the latest user message, used for
+    # idempotent chat submission (a retry of an already-accepted message is
+    # rejected with 409 instead of duplicating the message/execution).
+    client_message_id: str | None = None
 
 
 class SkillToggleRequest(BaseModel):
@@ -128,7 +137,37 @@ Prefer clear, practical answers. Follow the user's latest instruction unless it 
 # ── App factory ───────────────────────────────────────────────────────────
 
 
-app = FastAPI(title="Assistant Agent API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Alembic is the authoritative schema mechanism: the server expects the
+    # database to already be migrated (`alembic upgrade head` before boot)
+    # and never creates or mutates schema at startup. A missing or
+    # unmigrated database fails startup with an explicit error instead of
+    # silently booting against an incomplete schema.
+    host = config.database_url.split("@")[-1]
+    logger.info("Initializing database engine: %s", host)
+    init_engine(config.database_url)
+
+    ok, checks = await _readiness()
+    if not ok:
+        logger.error(
+            "Startup aborted: database is not ready (%s). "
+            "Create the database and run `alembic upgrade head` before starting the server.",
+            checks,
+        )
+        raise RuntimeError(f"Database not ready at startup: {checks}")
+
+    async with session_context() as session:
+        await skill_store.seed_global_skills(session)
+    logger.info("Startup complete: schema at %s", checks.get("schema"))
+
+    yield
+
+    await close_engine()
+    logger.info("Database engine closed.")
+
+
+app = FastAPI(title="Assistant Agent API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -148,7 +187,15 @@ async def get_db() -> AsyncSession:
         yield session
 
 
-# ── Tool registry (shared per-process) ────────────────────────────────────
+# ── Tool registry (request-local) ──────────────────────────────────────────
+#
+# Isolation design: a full registry is built fresh per chat request inside
+# `event_stream()` (below) — there is no shared application-level registry.
+# Per-user filtering then derives a request-local registry via
+# `ToolRegistry.filtered()`, which copies rather than mutates. One user's
+# toggles can therefore never alter the tools visible/executable by a
+# concurrent request, and execution (`registry.execute`) only resolves names
+# present in that request's filtered registry.
 
 
 def _build_tool_registry(user_id: str, db: AsyncSession) -> ToolRegistry:
@@ -199,14 +246,6 @@ async def _get_user(request: Request, db: AsyncSession) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user
-
-
-# ── SSE helpers ───────────────────────────────────────────────────────────
-
-
-def _sse(event_type: str, data: dict[str, Any]) -> str:
-    payload = json.dumps({"type": event_type, **data}, ensure_ascii=False)
-    return f"data: {payload}\n\n"
 
 
 # ── Auth endpoints ───────────────────────────────────────────────────────
@@ -524,34 +563,6 @@ async def toggle_tool(
     return {"ok": True}
 
 
-# ── Title generation helper ───────────────────────────────────────────────
-
-
-async def _generate_title(user_message: str, llm: LLMClient) -> str | None:
-    conversation = Conversation()
-    conversation.set_static_prefix([
-        (
-            "Generate a short, concise title (maximum 60 characters) for a chat conversation "
-            "based on the user's first message. Reply with ONLY the title itself — no quotes, "
-            "no punctuation at the end, no explanation. The title should capture the main topic "
-            "or request."
-        ),
-    ])
-    conversation.add_user_message(user_message)
-
-    try:
-        response = await llm.chat(
-            messages=conversation.get_messages_for_api(),
-            temperature=0.3,
-            max_tokens=30,
-            reasoning=False,
-        )
-        title = response.content.strip().strip('"').strip("'").strip()
-        return title[:60] if title else None
-    except Exception:
-        return None
-
-
 # ── Chat endpoint (SSE streaming) ────────────────────────────────────────
 
 
@@ -571,10 +582,51 @@ async def chat(
         thread_id = thread["thread_id"]
 
     user_msg = req.messages[-1] if req.messages else None
-    if user_msg and user_msg.get("role") == "user":
-        await thread_store.save_message(
-            db, thread_id, user["id"], "user", content=user_msg.get("content", "")
+    saves_user_message = bool(user_msg and user_msg.get("role") == "user")
+
+    # Idempotency: reject a retry of an already-accepted client user message
+    # before any LLM work starts. The unique index on
+    # (thread_id, client_message_id) is the concurrency-safe backstop — the
+    # read below alone cannot protect against two racing requests.
+    if saves_user_message and req.client_message_id:
+        existing = await thread_store.get_message_by_client_id(
+            db, thread_id, req.client_message_id
         )
+        if existing:
+            logger.info(
+                "Duplicate chat submission rejected (user=%s thread=%s client_message_id=%s)",
+                user["id"], thread_id, req.client_message_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "duplicate_message",
+                    "message_id": existing["id"],
+                    "thread_id": thread_id,
+                },
+            )
+
+    if saves_user_message:
+        try:
+            await thread_store.save_message(
+                db, thread_id, user["id"], "user",
+                content=user_msg.get("content", ""),
+                client_message_id=req.client_message_id,
+            )
+        except IntegrityError:
+            # Race lost: another request accepted the same client message id.
+            await db.rollback()
+            logger.info(
+                "Duplicate chat submission rejected at insert (user=%s thread=%s client_message_id=%s)",
+                user["id"], thread_id, req.client_message_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "duplicate_message",
+                    "thread_id": thread_id,
+                },
+            )
 
     first_user_msg = ""
     if is_new_thread:
@@ -587,9 +639,10 @@ async def chat(
         llm = LLMClient(config)
         tools = _build_tool_registry(user_id, db)
         enabled_tool_names = await tool_store.get_enabled_tool_names(db, user["id"])
-        for name in list(tools.tool_names):
-            if name not in enabled_tool_names:
-                tools.unregister(name)
+        # Always-enabled infrastructure tools (memory, skill content) stay
+        # available even if toggle data is ever inconsistent with the API
+        # guards in tool_store.set_tool_toggle().
+        tools = tools.filtered(enabled_tool_names | tool_store.ALWAYS_ENABLED)
         context_builder = ContextBuilder(config, llm)
 
         await context_builder.compact_if_needed(db, user["id"], thread_id)
@@ -637,153 +690,28 @@ async def chat(
                     result=content,
                 )
 
-        max_turns = config.max_tool_calls_per_turn
-        assistant_content_parts: list[str] = []
-        all_reasoning: list[str] = []
-        total_turns = 0
+        runner = AgentRunner(
+            llm=llm,
+            tools=tools,
+            max_turns=config.max_agent_turns,
+            tool_timeout=config.tool_timeout,
+        )
         request_id = uuid.uuid4().hex[:12]
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        total_cached_tokens = 0
-        total_latency_ms = 0
 
-        for turn in range(max_turns):
-            total_turns = turn + 1
-            turn_start = time.monotonic()
-            response = await llm.chat(
-                messages=conversation.get_messages_for_api(),
-                tools=tools.to_openai_schemas(),
-            )
-            latency_ms = int((time.monotonic() - turn_start) * 1000)
-            total_latency_ms += latency_ms
-
-            usage = response.usage if hasattr(response, "usage") and response.usage else {}
-            prompt_tokens = usage.get("prompt_tokens", 0)
-            completion_tokens = usage.get("completion_tokens", 0)
-            cached_tokens = usage.get("cached_tokens", 0)
-            total_prompt_tokens += prompt_tokens
-            total_completion_tokens += completion_tokens
-            total_cached_tokens += cached_tokens
-
-            await thread_store.save_llm_call_log(
-                db,
-                request_id=request_id,
-                thread_id=thread_id,
-                user_id=user["id"],
-                turn=total_turns,
-                model=config.llm_model,
-                provider=config.llm_provider,
-                messages_count=len(conversation.messages),
-                tools_count=len(tools),
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=usage.get("total_tokens") or (prompt_tokens + completion_tokens) or None,
-                cached_tokens=cached_tokens,
-                finish_reason=response.finish_reason if hasattr(response, "finish_reason") else None,
-                latency_ms=latency_ms,
-                has_reasoning=bool(response.reasoning_content and response.reasoning_content.strip()),
-                has_tool_calls=bool(response.tool_calls),
-            )
-
-            logger.info(
-                "Turn %d: reasoning=%s content=%s tool_calls=%s",
-                turn + 1,
-                bool(response.reasoning_content),
-                bool(response.content),
-                bool(response.tool_calls),
-            )
-
-            if response.reasoning_content and response.reasoning_content.strip():
-                reasoning_text = response.reasoning_content.strip()
-                all_reasoning.append(reasoning_text)
-                yield _sse("reasoning", {
-                    "text": reasoning_text,
-                    "turn": turn + 1,
-                })
-
-                await thread_store.save_message(
-                    db, thread_id, user["id"], "assistant",
-                    reasoning=reasoning_text,
-                )
-
-            if response.content and not response.tool_calls:
-                conversation.add_assistant_message(content=response.content)
-                assistant_content_parts.append(response.content.strip())
-                yield _sse("text", {"content": response.content.strip()})
-                break
-
-            if response.tool_calls:
-                conversation.add_assistant_message(
-                    content=response.content,
-                    tool_calls=response.tool_calls,
-                )
-
-                for tc in response.tool_calls:
-                    tool_name = tc["function"]["name"]
-                    try:
-                        arguments = json.loads(tc["function"]["arguments"])
-                    except json.JSONDecodeError:
-                        arguments = {}
-
-                    yield _sse("tool_call", {
-                        "id": tc["id"],
-                        "name": tool_name,
-                        "arguments": arguments,
-                    })
-
-                    logger.info("Tool call: %s(%s)", tool_name, arguments)
-                    result = await tools.execute(tool_name, **arguments)
-
-                    yield _sse("tool_result", {
-                        "id": tc["id"],
-                        "name": tool_name,
-                        "result": result,
-                    })
-
-                    conversation.add_tool_result(
-                        tool_call_id=tc["id"],
-                        tool_name=tool_name,
-                        result=result,
-                    )
-
-                    await thread_store.save_message(
-                        db,
-                        thread_id,
-                        user["id"],
-                        "tool",
-                        tool_name=tool_name,
-                        tool_call_id=tc["id"],
-                        tool_result={"result": result, "arguments": arguments},
-                    )
-
-                continue
-
-            break
-
-        if assistant_content_parts:
-            await thread_store.save_message(
-                db, thread_id, user["id"], "assistant",
-                content="\n".join(assistant_content_parts),
-            )
-
-        yield _sse("usage", {
-            "prompt_tokens": total_prompt_tokens,
-            "completion_tokens": total_completion_tokens,
-            "total_tokens": total_prompt_tokens + total_completion_tokens,
-            "cached_tokens": total_cached_tokens,
-            "turns": total_turns,
-            "latency_ms": total_latency_ms,
-        })
-
-        if is_new_thread and first_user_msg:
-            try:
-                title = await _generate_title(first_user_msg, llm)
-                if title:
-                    await thread_store.update_thread_title(db, thread_id, title)
-            except Exception:
-                pass
-
-        yield _sse("done", {})
+        async for chunk in stream_agent_events(
+            runner=runner,
+            conversation=conversation,
+            db=db,
+            thread_id=thread_id,
+            user_id=user["id"],
+            request_id=request_id,
+            model=config.llm_model,
+            provider=config.llm_provider,
+            llm=llm,
+            generate_title=is_new_thread and bool(first_user_msg),
+            first_user_msg=first_user_msg,
+        ):
+            yield chunk
 
     return StreamingResponse(
         event_stream(),
@@ -812,31 +740,107 @@ async def geo(request: Request, req: GeoRequest):
     return {"ok": True}
 
 
-# ── Startup ───────────────────────────────────────────────────────────────
+# ── Health / Readiness ───────────────────────────────────────────────────
 
 
-@app.on_event("startup")
-async def startup():
-    logger.info("Initializing database engine: %s", config.database_url)
-    init_engine(config.database_url)
+def _alembic_head_revision() -> str | None:
+    """Resolve the migration head revision id from disk (no DB access).
 
-    from core.db.base import Base
-    from assistant.models import (
-        User, Session, ThreadState, ConversationMessage, CompactionCheckpoint, Skill, UserSkillToggle,
-    )
-    async with session_context() as session:
-        async with session.bind.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-    async with session_context() as session:
-        await skill_store.seed_global_skills(session)
-    logger.info("Database tables ensured.")
+    Returns None when the migration directory cannot be read; callers then
+    fall back to connectivity-only readiness.
+    """
+    from alembic.config import Config as AlembicConfig
+    from alembic.script import ScriptDirectory
+    try:
+        cfg = AlembicConfig()
+        cfg.set_main_option(
+            "script_location",
+            str(config.project_root / "migrations"),
+        )
+        return ScriptDirectory.from_config(cfg).get_current_head()
+    except Exception:
+        logger.warning("Readiness check: could not resolve alembic head revision")
+        return None
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    from core.db import close_engine
-    await close_engine()
-    logger.info("Database engine closed.")
+async def _readiness(
+    engine=None,
+) -> tuple[bool, dict[str, str]]:
+    """Check that the app can serve normal requests.
+
+    Deliberately checks ONLY the application's own persistence layer:
+    database connectivity and schema/migration compatibility. It never calls
+    the LLM provider or any external API, so transient model-provider
+    downtime does not make every replica appear dead.
+
+    ``engine`` defaults to the app's global engine; tests inject their own.
+    Returns (ok, per-check details).
+    """
+    checks: dict[str, str] = {}
+    if engine is None:
+        try:
+            engine = get_engine()
+        except RuntimeError as exc:
+            checks["database"] = f"not_initialized: {exc}"
+            return False, checks
+
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception:
+        logger.warning("Readiness check: database unreachable", exc_info=True)
+        checks["database"] = "unreachable"
+        return False, checks
+
+    try:
+        async with engine.connect() as conn:
+            row = (await conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            )).first()
+        db_rev: str | None = row[0] if row else None
+        head = _alembic_head_revision()
+        if head is not None and db_rev != head:
+            checks["schema"] = f"mismatch: db={db_rev} head={head}"
+            logger.warning("Readiness check: schema mismatch (db=%s head=%s)", db_rev, head)
+            return False, checks
+        checks["schema"] = f"ok ({db_rev})"
+    except Exception:
+        logger.warning("Readiness check: schema check failed", exc_info=True)
+        checks["schema"] = "unknown"
+        return False, checks
+
+    return True, checks
+
+
+@app.get("/health")
+async def health() -> dict:
+    """Liveness probe: the process is alive and serving.
+
+    Cheap, dependency-free — deliberately does not touch the database or any
+    external service, so it can distinguish "process up" from "ready to
+    serve requests" (see /ready).
+    """
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready() -> dict:
+    """Readiness probe: the app can serve normal requests.
+
+    Requires a reachable PostgreSQL database whose schema is at the current
+    Alembic migration head. Never calls the LLM provider or external APIs.
+    """
+    ok, checks = await _readiness()
+    if not ok:
+        raise HTTPException(status_code=503, detail=checks)
+    return {"status": "ready", **checks}
+
+
+# ── Startup / shutdown ────────────────────────────────────────────────────
+# Managed by the FastAPI lifespan handler defined next to the app factory
+# (see `lifespan` above): engine init + schema readiness check + skill seed
+# on boot, engine disposal on shutdown.
 
 
 if __name__ == "__main__":
