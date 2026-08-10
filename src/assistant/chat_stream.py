@@ -1,0 +1,212 @@
+"""Chat stream executor — transport + persistence + terminal SSE protocol.
+
+Consumes the AgentRunner's application events for one chat request and
+turns them into wire-ready SSE strings, coordinating persistence through
+the request's SQLAlchemy session (owned by the route). Kept separate from
+`server.py` so the terminal protocol is testable without importing the
+FastAPI app (and its heavy transitive imports).
+
+Terminal protocol:
+
+  - success / limit:  ... events ... -> [limit_reached] -> usage -> done
+  - controlled failure: ... events ... -> error  (no usage, no done)
+
+``error`` is terminal: ``done`` is never emitted after it. Client
+disconnection cancels this generator via ``asyncio.CancelledError``, which
+is NOT caught here and therefore propagates (cancellation is not treated as
+an application error).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, AsyncGenerator
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from core.conversation import Conversation
+from core.llm_client import LLMClient
+from assistant.agent_runner import AgentExecutionError, AgentRunner, LlmCallRecord
+from assistant import thread_store
+
+logger = logging.getLogger(__name__)
+
+
+def _sse(event_type: str, data: dict[str, Any]) -> str:
+    payload = json.dumps({"type": event_type, **data}, ensure_ascii=False)
+    return f"data: {payload}\n\n"
+
+
+async def generate_title(user_message: str, llm: LLMClient) -> str | None:
+    """Generate a short thread title from the first user message."""
+    conversation = Conversation()
+    conversation.set_static_prefix([
+        (
+            "Generate a short, concise title (maximum 60 characters) for a chat conversation "
+            "based on the user's first message. Reply with ONLY the title itself — no quotes, "
+            "no punctuation at the end, no explanation. The title should capture the main topic "
+            "or request."
+        ),
+    ])
+    conversation.add_user_message(user_message)
+
+    try:
+        response = await llm.chat(
+            messages=conversation.get_messages_for_api(),
+            temperature=0.3,
+            max_tokens=30,
+            reasoning=False,
+        )
+        title = response.content.strip().strip('"').strip("'").strip()
+        return title[:60] if title else None
+    except Exception:
+        return None
+
+
+async def stream_agent_events(
+    *,
+    runner: AgentRunner,
+    conversation: Conversation,
+    db: AsyncSession,
+    thread_id: str,
+    user_id: int,
+    request_id: str,
+    model: str,
+    provider: str,
+    llm: LLMClient,
+    generate_title: bool,
+    first_user_msg: str,
+) -> AsyncGenerator[str, None]:
+    """Consume runner events for one chat request: persist, emit SSE, terminate.
+
+    Yields wire-ready SSE strings (see module docstring for the protocol).
+    """
+    try:
+        async for event in runner.run(conversation):
+            if event.type == "llm_call":
+                await _save_llm_call_log(
+                    db, thread_id, user_id, request_id, model, provider,
+                    event.data["llm_call"],
+                )
+            elif event.type == "reasoning":
+                yield _sse("reasoning", event.data)
+                await thread_store.save_message(
+                    db, thread_id, user_id, "assistant",
+                    reasoning=event.data["text"],
+                )
+            elif event.type == "text":
+                yield _sse("text", event.data)
+            elif event.type == "tool_call":
+                yield _sse("tool_call", event.data)
+            elif event.type == "tool_result":
+                # The SSE payload stays {id, name, result}; arguments are
+                # carried on the event only for persistence.
+                yield _sse("tool_result", {
+                    "id": event.data["id"],
+                    "name": event.data["name"],
+                    "result": event.data["result"],
+                })
+                await thread_store.save_message(
+                    db,
+                    thread_id,
+                    user_id,
+                    "tool",
+                    tool_name=event.data["name"],
+                    tool_call_id=event.data["id"],
+                    tool_result={
+                        "result": event.data["result"],
+                        "arguments": event.data["arguments"],
+                    },
+                )
+    except AgentExecutionError as e:
+        logger.error(
+            "Agent execution failed (request=%s thread=%s user=%s): %s",
+            request_id, thread_id, user_id, e, exc_info=True,
+        )
+        yield _sse("error", {
+            "code": "llm_error",
+            "message": "The model service is temporarily unavailable. Please try again.",
+        })
+        return
+    except Exception as e:
+        logger.error(
+            "Chat request failed (request=%s thread=%s user=%s): %s",
+            request_id, thread_id, user_id, e, exc_info=True,
+        )
+        yield _sse("error", {
+            "code": "internal_error",
+            "message": "Something went wrong processing your request. Please try again.",
+        })
+        return
+
+    # run() always sets result on normal completion.
+    result = runner.result
+    if result is None:
+        yield _sse("error", {
+            "code": "internal_error",
+            "message": "Execution ended without a result. Please try again.",
+        })
+        return
+
+    if result.limit_reached:
+        yield _sse("limit_reached", {"turns": result.turns})
+    if result.final_text is not None:
+        await thread_store.save_message(
+            db, thread_id, user_id, "assistant",
+            content=result.final_text,
+        )
+
+    yield _sse("usage", {
+        "prompt_tokens": result.total_prompt_tokens,
+        "completion_tokens": result.total_completion_tokens,
+        "total_tokens": result.total_prompt_tokens + result.total_completion_tokens,
+        "cached_tokens": result.total_cached_tokens,
+        "turns": result.turns,
+        "latency_ms": result.total_latency_ms,
+    })
+
+    if generate_title and first_user_msg:
+        try:
+            title = await generate_title(first_user_msg, llm)
+            if title:
+                await thread_store.update_thread_title(db, thread_id, title)
+        except Exception:
+            pass
+
+    yield _sse("done", {})
+
+
+async def _save_llm_call_log(
+    db: AsyncSession,
+    thread_id: str,
+    user_id: int,
+    request_id: str,
+    model: str,
+    provider: str,
+    record: LlmCallRecord,
+) -> None:
+    """Persist one turn's LLM call record (internal, not streamed)."""
+    prompt_tokens = record.usage.get("prompt_tokens", 0)
+    completion_tokens = record.usage.get("completion_tokens", 0)
+    await thread_store.save_llm_call_log(
+        db,
+        request_id=request_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        turn=record.turn,
+        model=model,
+        provider=provider,
+        messages_count=record.messages_count,
+        tools_count=record.tools_count,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=record.usage.get("total_tokens")
+        or (prompt_tokens + completion_tokens)
+        or None,
+        cached_tokens=record.usage.get("cached_tokens", 0),
+        finish_reason=record.finish_reason,
+        latency_ms=record.latency_ms,
+        has_reasoning=record.has_reasoning,
+        has_tool_calls=record.has_tool_calls,
+    )
