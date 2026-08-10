@@ -49,9 +49,9 @@ class WebFetchTool(Tool):
             return f"HTTP error fetching {url}: {e.response.status_code}"
         except httpx.TimeoutException:
             return f"Timeout fetching {url}"
-        except Exception as e:
-            logger.error("Fetch failed for %s: %s", url, e)
-            return f"Failed to fetch {url}: {e}"
+        except Exception:
+            logger.error("Fetch failed for %s", url, exc_info=True)
+            return f"Failed to fetch {url}"
 
         text = self._extract_text(content)
 

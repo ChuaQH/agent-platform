@@ -5,10 +5,13 @@ Path traversal protection ensures tools cannot escape the workspace directory.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from core.tool_framework import Tool
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_WORKSPACE = Path("agent-data") / "workspace"
 _MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB read limit
@@ -65,8 +68,9 @@ class ReadFileTool(Tool):
 
         try:
             text = target.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:
-            return f"Error reading file: {e}"
+        except Exception:
+            logger.error("Failed to read file: %s", target, exc_info=True)
+            return f"Error reading file: {path}"
 
         lines = text.split("\n")
         total_lines = len(lines)
@@ -125,5 +129,6 @@ class WriteFileTool(Tool):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             return f"Wrote {len(content)} bytes to {path}"
-        except Exception as e:
-            return f"Error writing file: {e}"
+        except Exception:
+            logger.error("Failed to write file: %s", target, exc_info=True)
+            return f"Error writing file: {path}"

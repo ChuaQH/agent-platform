@@ -67,9 +67,9 @@ class WebSearchTool(Tool):
                 return "Search rate limit reached. Please wait a moment and try again."
             logger.error("Brave search HTTP error: %s", e)
             return f"Search failed (HTTP {e.response.status_code})"
-        except Exception as e:
-            logger.error("Brave search failed: %s", e)
-            return f"Search failed: {e}"
+        except Exception:
+            logger.error("Brave search failed", exc_info=True)
+            return "Search failed. Please try again."
 
         if not results:
             return f"No results found for: {query}"

@@ -5,11 +5,14 @@ Dependencies are optional — tools degrade gracefully if packages are missing.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from core.tool_framework import Tool
 from core.tools.file_io import _resolve, _DEFAULT_WORKSPACE
+
+logger = logging.getLogger(__name__)
 
 
 class ExtractTextTool(Tool):
@@ -70,8 +73,9 @@ class ExtractTextTool(Tool):
             doc.close()
             text = "\n\n".join(pages)
             return f"Extracted from {display_path} ({len(pages)} pages):\n\n{text}"
-        except Exception as e:
-            return f"Error extracting PDF: {e}"
+        except Exception:
+            logger.error("Failed to extract PDF: %s", display_path, exc_info=True)
+            return f"Error extracting PDF: {display_path}"
 
 
 class ReadSpreadsheetTool(Tool):
@@ -162,5 +166,6 @@ class ReadSpreadsheetTool(Tool):
                 + "\n".join(sheets_info)
                 + f"\n\nUse read_file to read individual sheet content."
             )
-        except Exception as e:
-            return f"Error reading spreadsheet: {e}"
+        except Exception:
+            logger.error("Failed to read spreadsheet: %s", display_path, exc_info=True)
+            return f"Error reading spreadsheet: {display_path}"

@@ -23,6 +23,10 @@ def init_engine(database_url: str, echo: bool = False) -> None:
         pool_size=10,
         max_overflow=20,
         pool_pre_ping=True,
+        # Bound connect attempts so an unreachable database fails fast
+        # (asyncpg's default is 60s) — readiness probes and request paths
+        # report failure instead of hanging.
+        connect_args={"timeout": 10},
     )
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
 

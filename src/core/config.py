@@ -27,9 +27,10 @@ DEFAULTS: dict[str, Any] = {
         "reasoning": True,
         "reasoning_effort": "medium",
         "multimodal": False,
+        "timeout": 120.0,
     },
     "agent": {
-        "max_tool_calls_per_turn": 10,
+        "max_agent_turns": 10,
         "max_subagent_turns": 20,
         "tool_timeout": 30,
         "compress_threshold": 0.8,
@@ -75,6 +76,8 @@ ENV_MAP: dict[str, tuple[tuple[str, ...], Any]] = {
     "ACA_LLM_BASE_URL":         (("llm", "base_url"), str),
     "ACA_LLM_MAX_TOKENS":       (("llm", "max_tokens"), int),
     "ACA_LLM_TEMPERATURE":      (("llm", "temperature"), float),
+    "ACA_LLM_TIMEOUT":          (("llm", "timeout"), float),
+    "ACA_MAX_AGENT_TURNS":      (("agent", "max_agent_turns"), int),
     "ACA_MAX_TOOL_CALLS":       (("agent", "max_tool_calls_per_turn"), int),
     "ACA_MAX_SUBAGENT_TURNS":   (("agent", "max_subagent_turns"), int),
     "ACA_TOOL_TIMEOUT":         (("agent", "tool_timeout"), int),
@@ -198,6 +201,11 @@ class Config:
         return self._get("llm", "base_url", default="https://api.deepseek.com")
 
     @property
+    def llm_timeout(self) -> float:
+        """Per-request timeout for a single LLM chat call (seconds)."""
+        return self._get("llm", "timeout", default=120.0)
+
+    @property
     def llm_max_tokens(self) -> int:
         return self._get("llm", "max_tokens", default=8192)
 
@@ -219,8 +227,18 @@ class Config:
 
     # ── Agent ──
     @property
-    def max_tool_calls_per_turn(self) -> int:
-        return self._get("agent", "max_tool_calls_per_turn", default=10)
+    def max_agent_turns(self) -> int:
+        """Maximum number of LLM turns per chat request.
+
+        ``max_agent_turns`` is the canonical key. The legacy
+        ``max_tool_calls_per_turn`` key (config file / ``ACA_MAX_TOOL_CALLS``
+        env var) is still honoured for backward compatibility.
+        """
+        agent_cfg = self._data.get("agent") or {}
+        for key in ("max_agent_turns", "max_tool_calls_per_turn"):
+            if agent_cfg.get(key) is not None:
+                return int(agent_cfg[key])
+        return int(DEFAULTS["agent"].get("max_agent_turns", 10))
 
     @property
     def max_subagent_turns(self) -> int:

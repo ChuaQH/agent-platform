@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from core.tool_framework import Tool
+
+logger = logging.getLogger(__name__)
 
 _API_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -134,6 +137,8 @@ class WeatherTool(Tool):
                 return "\n".join(lines)
 
         except httpx.HTTPError as e:
-            return f"Weather API error: {e}"
-        except Exception as e:
-            return f"Weather lookup failed: {e}"
+            logger.error("Weather API error: %s", e)
+            return "Weather API error. Please try again."
+        except Exception:
+            logger.error("Weather lookup failed", exc_info=True)
+            return "Weather lookup failed. Please try again."

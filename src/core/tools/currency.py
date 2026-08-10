@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from core.tool_framework import Tool
+
+logger = logging.getLogger(__name__)
 
 _API_URL = "https://open.er-api.com/v6/latest"
 
@@ -74,6 +77,8 @@ class CurrencyTool(Tool):
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return f"Unknown source currency: {from_cur}"
+            logger.error("Currency API error (HTTP %s)", e.response.status_code)
             return f"Currency API error (HTTP {e.response.status_code})"
-        except Exception as e:
-            return f"Currency conversion failed: {e}"
+        except Exception:
+            logger.error("Currency conversion failed", exc_info=True)
+            return "Currency conversion failed. Please try again."

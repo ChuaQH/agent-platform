@@ -6,9 +6,12 @@ Each agent (aca, assistant) registers its own tools via ToolRegistry.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -69,6 +72,19 @@ class ToolRegistry:
         """Remove a registered tool by name."""
         self._tools.pop(name, None)
 
+    def filtered(self, enabled_names: set[str]) -> ToolRegistry:
+        """Return a NEW registry containing only tools whose names are in ``enabled_names``.
+
+        The original registry is not mutated. This is the safe way to derive a
+        request/user-scoped tool set from a full registry: per-request filtering
+        must never modify state that other concurrent requests observe.
+        """
+        filtered_registry = ToolRegistry()
+        for name in self.tool_names:
+            if name in enabled_names:
+                filtered_registry.register(self._tools[name])
+        return filtered_registry
+
     def register_many(self, tools: list[Tool]) -> None:
         """Register multiple tools at once."""
         for tool in tools:
@@ -79,14 +95,23 @@ class ToolRegistry:
         return self._tools.get(name)
 
     async def execute(self, name: str, **params: Any) -> str:
-        """Execute a tool by name. Returns result string."""
+        """Execute a tool by name. Returns result string.
+
+        Unhandled tool exceptions are logged with full detail server-side but
+        surfaced to the model as a controlled message WITHOUT the raw
+        exception text, so internal details never reach the LLM or client.
+        """
         tool = self._tools.get(name)
         if tool is None:
             return f"Error: tool '{name}' not found"
         try:
             return await tool.execute(**params)
-        except Exception as e:
-            return f"Error executing tool '{name}': {e}"
+        except Exception:
+            logger.error(
+                "Tool '%s' raised an unhandled exception", name,
+                exc_info=True,
+            )
+            return f"Error executing tool '{name}'"
 
     def to_openai_schemas(self) -> list[dict[str, Any]]:
         """Export all tools as OpenAI-compatible function definitions."""
