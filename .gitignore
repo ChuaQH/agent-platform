@@ -24,13 +24,14 @@ Thumbs.db
 # Frontend
 apps/*/node_modules/
 apps/*/.next/
-apps/*/package-lock.json
 apps/*/.env.local
+
+# Test cache
+.pytest_cache/
 
 # Personal Notes
 src/assistant/personal_notes.md
 PROJECT_BRIEF.md
-handover.md
 personal-notes.txt
 ARCHITECTURE.md
 src/aca/ARCHITECTURE.md

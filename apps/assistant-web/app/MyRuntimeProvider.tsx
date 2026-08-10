@@ -119,7 +119,9 @@ export function MyRuntimeProvider({
               ...(Array.isArray(last.content) ? last.content : []),
               ...parts,
             ] as AnyPart[];
-            newIds.set(last.id, m.id);
+            if (last.id) {
+              newIds.set(last.id, m.id);
+            }
             msgs[lastIdx] = {
               ...last,
               content: merged as unknown as ThreadMessageLike["content"],
@@ -233,9 +235,29 @@ export function MyRuntimeProvider({
           body: JSON.stringify({
             messages: requestMessages,
             thread_id: currentThreadIdRef.current || undefined,
+            client_message_id: userMsgId,
           }),
           signal: controller.signal,
         });
+
+        if (res.status === 409) {
+          // Duplicate submission: this user message was already accepted by
+          // the backend (a retried request). No second execution happens;
+          // reload the thread to show the existing conversation instead.
+          const tid = currentThreadIdRef.current;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id !== assistantId ? m
+                : ({ ...m, status: { type: "complete" } } as ThreadMessageLike)
+            )
+          );
+          if (tid) {
+            onSwitchToThread(tid);
+          } else {
+            threadList.refresh();
+          }
+          return;
+        }
 
         if (!res.ok) throw new Error(`Backend error: ${res.status}`);
 
@@ -330,6 +352,27 @@ export function MyRuntimeProvider({
                       content.push({ type: "text", text: `\n\n> ${summary}` });
                     });
                   }
+                  break;
+                }
+                case "error": {
+                  updateAssistant((content) => {
+                    content.push({ type: "text", text: `\n\n*${event.message}*` });
+                  });
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id !== assistantId ? m
+                        : ({ ...m, status: { type: "incomplete", reason: "error" } } as ThreadMessageLike)
+                    )
+                  );
+                  break;
+                }
+                case "limit_reached": {
+                  updateAssistant((content) => {
+                    content.push({
+                      type: "text",
+                      text: "\n\n*Reached the maximum number of steps. Please continue in a new message.*",
+                    });
+                  });
                   break;
                 }
                 case "done": {
