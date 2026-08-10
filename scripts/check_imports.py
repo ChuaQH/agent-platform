@@ -20,6 +20,12 @@ import ast
 import sys
 from pathlib import Path
 
+# The report uses ✅/❌ glyphs; Windows consoles default to cp1252 and crash
+# on them. Force UTF-8 output (safe for the console, essential for CI logs).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ── Configuration ──────────────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
