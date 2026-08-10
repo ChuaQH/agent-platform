@@ -47,8 +47,10 @@ All API keys and secrets go through `.env` → `core/config.py`. The flow:
 - Async everywhere (asyncio + httpx)
 - Append-only conversation history for prompt caching
 - Memory layers queried via TOOLS, never inserted into system prompt
-- Typer CLI with Rich output
-- LanceDB for vector DB, SQLite for metadata, bge-m3 for embeddings
+- Typer CLI with Rich output (aca CLI only)
+- Durable store: PostgreSQL via async SQLAlchemy; schema via Alembic (head 007)
+- Vector memory: pgvector (bge-m3 embeddings); no runtime create_all
+- Web layer: FastAPI + SSE (assistant); no new infra (Redis/Kafka/Celery) without justification
 
 ## When Editing Files
 

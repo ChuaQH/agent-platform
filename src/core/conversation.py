@@ -1,8 +1,9 @@
 """Conversation state management.
 
 Maintains append-only message history with static prefix tracking.
-Handles conversation compression when approaching context limits.
-Shared by all agents (aca, assistant).
+This is the model-visible in-memory execution state for a chat request;
+durable state lives in PostgreSQL (see thread_store). Shared by all agents
+(aca, assistant).
 """
 
 from __future__ import annotations

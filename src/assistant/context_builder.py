@@ -1,7 +1,8 @@
 """Context builder — cache-aware prompt ordering, token budget, adaptive checkpoint compaction.
 
 Implements:
-- 5-section prompt ordering (system → tool policy → prefs → checkpoint → messages)
+- Ordered prompt sections (system → tool policy → response prefs →
+  checkpoint summary → enabled skills) followed by the recent messages
 - Token estimation via tiktoken
 - Two-pass compaction: tool output pruning → full checkpoint summarization
 - Stable checkpoint summaries

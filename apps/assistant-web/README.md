@@ -1,38 +1,48 @@
-# External Store Integration
+# assistant-web
 
-This example demonstrates how to use assistant-ui with an external message store using `useExternalStoreRuntime`.
+The Next.js chat frontend for the Assistant Agent. Built on
+[assistant-ui](https://www.assistant-ui.com/)'s
+`useExternalStoreRuntime`, which drives a custom SSE backend
+(`POST /api/chat` on the FastAPI server).
 
-## Quick Start
+## Stack
 
-### Using CLI (Recommended)
+- Next.js 16, React 19, TypeScript
+- assistant-ui (`@assistant-ui/react`) — chat runtime + thread primitives
+- Radix UI + Tailwind CSS 4 — settings dialog, dropdowns, switches
+- Plain `fetch` with an `AbortController` for SSE streaming
+
+## Key files
+
+| File | Purpose |
+|---|---|
+| `app/MyRuntimeProvider.tsx` | SSE consumer; optimistically renders messages; converts backend events into assistant-ui message parts; sends `client_message_id` for idempotency and reloads the thread on `409` duplicates |
+| `app/page.tsx` | Layout: sidebar thread list + settings dialog |
+| `components/settings/` | Skills and Tools toggle tabs (optimistic updates with revert) |
+| `components/thread.tsx` | Chat thread rendering (reasoning, tool calls, markdown) |
+| `lib/auth.tsx` | `AuthProvider` + `useAuth`; token stored in `localStorage` |
+| `lib/thread-list-adapter.tsx` | Sidebar ↔ backend threads API |
+
+## Running
 
 ```bash
-npx assistant-ui@latest create my-app --example with-external-store
-cd my-app
+npm ci
+npm run dev        # http://localhost:3000 (expects backend on :8000)
 ```
 
-### Environment Variables
-
-Create `.env.local`:
-
-```
-OPENAI_API_KEY=sk-...
-```
-
-### Run
+Production-style checks:
 
 ```bash
-npm run dev
+npx tsc --noEmit
+npm run build
 ```
 
-## Features
+## Backend contract
 
-- External store runtime via `useExternalStoreRuntime`
-- Custom message state management
-- React state-based message storage
-- Message conversion utilities
-
-## Related Documentation
-
-- [assistant-ui Documentation](https://www.assistant-ui.com/docs)
-- [External Store Runtime Guide](https://www.assistant-ui.com/docs/runtimes/external-store)
+- `POST /api/chat` returns a `text/event-stream`; events are
+  `data: {"type": ..., ...}` lines (`reasoning`, `tool_call`,
+  `tool_result`, `text`, `usage`, `limit_reached`, `done`, `error`).
+- `client_message_id` is sent with every chat POST; a `409
+  duplicate_message` means the message was already accepted and the thread
+  is reloaded instead of re-sending.
+- Full contract: see [`docs/API.md`](../../docs/API.md).

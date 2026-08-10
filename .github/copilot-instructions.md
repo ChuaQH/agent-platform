@@ -15,7 +15,7 @@ src/
 
 ## Tech stack
 
-Python 3.11+, DeepSeek V4 API (via openai SDK with base_url=https://api.deepseek.com), asyncio, httpx, Typer+Rich, LanceDB, bge-m3, SQLite.
+Python 3.11+ (async), DeepSeek V4 API (OpenAI SDK, base_url=https://api.deepseek.com), FastAPI + Uvicorn, Next.js frontend, async SQLAlchemy + Alembic, PostgreSQL + pgvector (bge-m3 embeddings), pytest (unit + integration).
 
 ## Editing rules
 
