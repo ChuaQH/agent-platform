@@ -54,3 +54,7 @@ packages = ["src/core", "src/aca", "src/assistant"]
 [tool.pytest.ini_options]
 addopts = "-v --tb=short"
 testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "integration: requires a running PostgreSQL (pgvector) instance; verifies the real migration chain and database invariants (self-skips when PostgreSQL is unreachable)",
+]
