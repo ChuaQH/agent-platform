@@ -68,9 +68,15 @@ class Session(Base):
 
 class ThreadState(Base):
     __tablename__ = "thread_state"
+    __table_args__ = (
+        # Named index matching migration 001 (was implicitly created as
+        # ix_thread_state_user_id by index=True — historical drift resolved
+        # by declaring the deployed name here).
+        Index("idx_thread_state_user", "user_id"),
+    )
 
     thread_id: Mapped[str] = mapped_column(String, primary_key=True)
-    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False, default="New Chat")
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     active_task_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -123,6 +129,15 @@ class ConversationMessage(Base):
         ),
         Index("idx_cm_thread", "thread_id", "created_at"),
         Index("idx_cm_user", "user_id", "thread_id"),
+        # Idempotency guard: one accepted client user message per thread.
+        # PostgreSQL treats NULLs as distinct, so legacy rows (and messages
+        # without a client ID) never collide.
+        Index(
+            "uq_conversation_messages_thread_client",
+            "thread_id",
+            "client_message_id",
+            unique=True,
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -136,6 +151,7 @@ class ConversationMessage(Base):
     tool_name: Mapped[str | None] = mapped_column(String, nullable=True)
     tool_call_id: Mapped[str | None] = mapped_column(String, nullable=True)
     tool_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    client_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=lambda: datetime.now(timezone.utc)
     )
@@ -153,6 +169,7 @@ class ConversationMessage(Base):
             "tool_name": self.tool_name,
             "tool_call_id": self.tool_call_id,
             "tool_result": self.tool_result,
+            "client_message_id": self.client_message_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -212,6 +229,19 @@ class Memory(Base):
             name="ck_memories_type",
         ),
         Index("idx_memories_user_type", "user_id", "memory_type"),
+        # HNSW vector index for cosine similarity search, created by
+        # migration 002. Declared here so `alembic check` sees it as present.
+        # Alembic/PG reflection cannot compare index *methods* or operator
+        # classes (alembic only compares names/columns/uniqueness), so this
+        # declaration keeps the model and migration in sync by name; the
+        # index method itself is pinned by migration 002 and verified by the
+        # PostgreSQL integration tests (see tests/test_integration.py).
+        Index(
+            "idx_memories_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
