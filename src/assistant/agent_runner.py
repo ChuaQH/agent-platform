@@ -27,7 +27,6 @@ the run ends — no tool result is ever produced that the model cannot see.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -36,7 +35,14 @@ from typing import Any, AsyncGenerator, Protocol
 
 from core.conversation import Conversation
 from core.llm_client import LLMResponse
-from core.tool_framework import ToolRegistry
+from core.tool_framework import ToolCapability, ToolRegistry
+from assistant.execution_gateway import (
+    ExecutionContext,
+    RegistryExecutionGateway,
+    RunPolicy,
+    ToolCallExecutor,
+    ToolExecutionResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +105,46 @@ class AgentResult:
     total_completion_tokens: int = 0
     total_cached_tokens: int = 0
     total_latency_ms: int = 0
+    waiting_for_approval: bool = False
+    pending_action_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RunnerContinuation:
+    """Versioned server-owned state needed to resume a paused tool batch."""
+    version: int
+    conversation_messages: list[dict[str, Any]]
+    static_prefix_length: int
+    static_prefix_hash: str
+    turn: int
+    pending_action_id: str
+    pending_tool_call_id: str
+    remaining_tool_calls: list[dict[str, Any]]
+    budget: dict[str, object]
+
+    @classmethod
+    def from_persisted(cls, state: dict[str, Any]) -> "RunnerContinuation":
+        """Strictly load the only continuation version this runner supports."""
+        required = {
+            "version", "conversation_messages", "static_prefix_length",
+            "static_prefix_hash", "turn", "pending_action_id",
+            "pending_tool_call_id", "remaining_tool_calls", "budget",
+        }
+        if set(state) != required or state.get("version") != 1:
+            raise ValueError("unsupported continuation version")
+        if (not isinstance(state["conversation_messages"], list)
+                or not all(isinstance(message, dict) for message in state["conversation_messages"])
+                or not isinstance(state["static_prefix_length"], int)
+                or state["static_prefix_length"] < 0
+                or not isinstance(state["static_prefix_hash"], str)
+                or not isinstance(state["turn"], int) or state["turn"] < 1
+                or not isinstance(state["pending_action_id"], str) or not state["pending_action_id"]
+                or not isinstance(state["pending_tool_call_id"], str) or not state["pending_tool_call_id"]
+                or not isinstance(state["remaining_tool_calls"], list)
+                or not all(isinstance(call, dict) for call in state["remaining_tool_calls"])
+                or not isinstance(state["budget"], dict)):
+            raise ValueError("invalid continuation state")
+        return cls(**state)
 
 
 class ChatModel(Protocol):
@@ -142,46 +188,82 @@ class AgentRunner:
         tools: ToolRegistry,
         max_turns: int,
         tool_timeout: float | None = None,
+        executor: ToolCallExecutor | None = None,
     ) -> None:
         self._llm = llm
         self._tools = tools
         self.max_turns = max_turns
         self.tool_timeout = tool_timeout
+        # Compatibility for direct library/test users. Production always
+        # injects a gateway with the authenticated route context.
+        self._executor = executor or RegistryExecutionGateway(
+            tools,
+            ExecutionContext(user_id=0, thread_id="", request_id="local"),
+            RunPolicy(
+                allowed_capabilities=frozenset(ToolCapability),
+                allowed_tools=None,
+                max_tool_calls=100,
+                max_calls_per_tool=None,
+                max_cumulative_tool_execution_seconds=300.0,
+            ),
+            tool_timeout=tool_timeout,
+        )
         self.result: AgentResult | None = None
+        self.continuation: RunnerContinuation | None = None
+        self._usage_totals: dict[str, int] = {
+            "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0,
+            "latency_ms": 0, "turns": 0,
+        }
 
-    async def _execute_tool(self, tool_name: str, arguments: dict) -> str:
-        """Execute one tool, bounded by the configured timeout if any."""
-        if self.tool_timeout is None:
-            return await self._tools.execute(tool_name, **arguments)
-        try:
-            return await asyncio.wait_for(
-                self._tools.execute(tool_name, **arguments),
-                timeout=self.tool_timeout,
-            )
-        except TimeoutError:
-            logger.error(
-                "Tool '%s' timed out after %.1fs", tool_name, self.tool_timeout,
-            )
-            return (
-                f"Error executing tool '{tool_name}': "
-                f"timed out after {self.tool_timeout:g}s"
-            )
+    async def _execute_tool(
+        self, tool_name: str, raw_arguments: str, tool_call_id: str | None = None,
+    ) -> ToolExecutionResult:
+        """Route every model-originated tool proposal through the executor."""
+        return await self._executor.execute(
+            tool_name=tool_name,
+            raw_arguments=raw_arguments,
+            tool_call_id=tool_call_id,
+        )
 
-    async def run(self, conversation: Conversation) -> AsyncGenerator[AgentEvent, None]:
+    def execution_budget_snapshot(self) -> dict[str, object] | None:
+        """Expose a safe final budget snapshot when the executor has one."""
+        budget = getattr(self._executor, "budget", None)
+        if budget is None:
+            return None
+        snapshot: dict[str, object] = {
+            "tool_call_attempts": budget.tool_call_attempts,
+            "tool_calls_by_name": dict(budget.tool_calls_by_name),
+            "cumulative_tool_execution_seconds": budget.cumulative_tool_execution_seconds,
+        }
+        snapshot["llm_usage"] = dict(self._usage_totals)
+        return snapshot
+
+    async def run(
+        self, conversation: Conversation, *, start_turn: int = 0,
+        initial_usage: dict[str, object] | None = None,
+    ) -> AsyncGenerator[AgentEvent, None]:
         """Execute the agent loop against the given conversation.
 
         The conversation is mutated in place (assistant/tool messages are
         appended) and, on completion, ``self.result`` holds the AgentResult.
         """
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        total_cached_tokens = 0
-        total_latency_ms = 0
+        initial_usage = initial_usage or {}
+        total_prompt_tokens = int(initial_usage.get("prompt_tokens", 0))
+        total_completion_tokens = int(initial_usage.get("completion_tokens", 0))
+        total_cached_tokens = int(initial_usage.get("cached_tokens", 0))
+        total_latency_ms = int(initial_usage.get("latency_ms", 0))
         final_text: str | None = None
         records: list[LlmCallRecord] = []
         limit_reached = False
+        waiting_for_approval = False
+        pending_action_id: str | None = None
 
-        for turn_number in range(1, self.max_turns + 1):
+        self._usage_totals = {
+            "prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens,
+            "cached_tokens": total_cached_tokens, "latency_ms": total_latency_ms,
+            "turns": start_turn,
+        }
+        for turn_number in range(start_turn + 1, self.max_turns + 1):
             turn_start = time.monotonic()
             try:
                 response = await self._llm.chat(
@@ -203,6 +285,11 @@ class AgentRunner:
             total_prompt_tokens += prompt_tokens
             total_completion_tokens += completion_tokens
             total_cached_tokens += cached_tokens
+            self._usage_totals = {
+                "prompt_tokens": total_prompt_tokens, "completion_tokens": total_completion_tokens,
+                "cached_tokens": total_cached_tokens, "latency_ms": total_latency_ms,
+                "turns": turn_number,
+            }
 
             records.append(LlmCallRecord(
                 turn=turn_number,
@@ -249,12 +336,14 @@ class AgentRunner:
                     tool_calls=response.tool_calls,
                 )
 
-                for tc in response.tool_calls:
+                for call_index, tc in enumerate(response.tool_calls):
                     tool_name = tc["function"]["name"]
+                    raw_arguments = tc["function"].get("arguments", "")
                     try:
-                        arguments = json.loads(tc["function"]["arguments"])
-                    except json.JSONDecodeError:
-                        arguments = {}
+                        parsed_arguments = json.loads(raw_arguments)
+                        arguments = parsed_arguments if isinstance(parsed_arguments, dict) else None
+                    except (TypeError, json.JSONDecodeError):
+                        arguments = None
 
                     yield AgentEvent("tool_call", {
                         "id": tc["id"],
@@ -263,20 +352,51 @@ class AgentRunner:
                     })
 
                     logger.info("Tool call: %s(%s)", tool_name, arguments)
-                    result = await self._execute_tool(tool_name, arguments)
+                    execution = await self._execute_tool(tool_name, raw_arguments, tc["id"])
+                    if execution.status == "approval_required":
+                        waiting_for_approval = True
+                        pending_action_id = execution.action_id
+                        self.continuation = RunnerContinuation(
+                            version=1, conversation_messages=list(conversation.messages),
+                            static_prefix_length=conversation.static_prefix_length,
+                            static_prefix_hash=conversation.static_prefix_hash,
+                            turn=turn_number, pending_action_id=execution.action_id or "",
+                            pending_tool_call_id=tc["id"],
+                            remaining_tool_calls=list(response.tool_calls[call_index + 1:]),
+                            budget=self.execution_budget_snapshot() or {},
+                        )
+                        yield AgentEvent("approval_required", {
+                            "id": tc["id"], "name": tool_name,
+                            "run_id": execution.run_id, "action_id": execution.action_id,
+                            "required_capabilities": list(execution.required_capabilities),
+                        })
+                        break
+                    model_result = execution.to_model_text()
 
-                    yield AgentEvent("tool_result", {
+                    tool_result_data = {
                         "id": tc["id"],
                         "name": tool_name,
-                        "result": result,
+                        "result": execution.content,
                         "arguments": arguments,
-                    })
+                        "status": execution.status,
+                        "reason_code": execution.reason_code,
+                        "required_capabilities": list(execution.required_capabilities),
+                        "limit_name": execution.limit_name,
+                    }
+                    if execution.run_id:
+                        tool_result_data["run_id"] = execution.run_id
+                    if execution.action_id:
+                        tool_result_data["action_id"] = execution.action_id
+                    yield AgentEvent("tool_result", tool_result_data)
 
                     conversation.add_tool_result(
                         tool_call_id=tc["id"],
                         tool_name=tool_name,
-                        result=result,
+                        result=model_result,
                     )
+
+                if waiting_for_approval:
+                    break
 
                 continue
 
@@ -284,11 +404,13 @@ class AgentRunner:
 
         self.result = AgentResult(
             final_text=final_text,
-            turns=records[-1].turn if records else 0,
+            turns=records[-1].turn if records else start_turn,
             limit_reached=limit_reached,
             llm_calls=records,
             total_prompt_tokens=total_prompt_tokens,
             total_completion_tokens=total_completion_tokens,
             total_cached_tokens=total_cached_tokens,
             total_latency_ms=total_latency_ms,
+            waiting_for_approval=waiting_for_approval,
+            pending_action_id=pending_action_id,
         )

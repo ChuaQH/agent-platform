@@ -42,6 +42,7 @@ from assistant.models import (  # noqa: E402
     UserSkillToggle,
     UserToolToggle,
 )
+from assistant.run_recorder import AgentRunRecord, SqlAlchemyRunRecorder
 from assistant import server as server_module  # noqa: E402
 
 pytestmark = pytest.mark.integration
@@ -58,6 +59,25 @@ async def _make_user(db, email="alice@example.com") -> dict:
 
 async def _make_thread(db, user_id: int) -> dict:
     return await thread_store.create_thread(db, user_id)
+
+
+@pytest.mark.asyncio
+async def test_run_and_action_lookup_are_scoped_to_owner(db_session) -> None:
+    alice = await _make_user(db_session, "run-alice@example.com")
+    bob = await _make_user(db_session, "run-bob@example.com")
+    thread = await _make_thread(db_session, alice["id"])
+    recorder = SqlAlchemyRunRecorder(db_session)
+    await recorder.create_run(AgentRunRecord(
+        run_id="owner-run", request_id="owner-request", user_id=alice["id"],
+        thread_id=thread["thread_id"], policy_snapshot={},
+    ))
+    action = await recorder.record_action_proposed(
+        run_id="owner-run", tool_name="calculator", raw_arguments='{"expression":"1+1"}',
+    )
+
+    assert await recorder.get_run_for_user("owner-run", bob["id"]) is None
+    assert await recorder.get_action_for_user(action.action_id, bob["id"]) is None
+    assert (await recorder.get_run_for_user("owner-run", alice["id"])).run_id == "owner-run"
 
 
 # ── A. Thread / message persistence ──────────────────────────────────────
@@ -505,4 +525,4 @@ async def test_readiness_detects_schema_mismatch(migrated_test_db_old) -> None:
 
 
 def test_alembic_head_revision_resolves_without_database() -> None:
-    assert server_module._alembic_head_revision() == "007"
+    assert server_module._alembic_head_revision() == "009"

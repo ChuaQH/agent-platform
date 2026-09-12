@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 
 # ── Length (base: meter) ────────────────────────────────────────────────
 _LENGTH: dict[str, float] = {
@@ -111,6 +111,7 @@ def _find_unit(unit: str) -> tuple[str, dict[str, float]]:
 
 class UnitConvertTool(Tool):
     name = "unit_convert"
+    capabilities = frozenset({ToolCapability.COMPUTE})
     description = (
         "Convert between units of measurement. "
         "Supports length, mass/weight, volume, area, speed, data storage, time, and temperature. "

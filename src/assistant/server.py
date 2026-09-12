@@ -23,7 +23,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,9 +40,14 @@ except ImportError:
     pass
 from core.llm_client import LLMClient
 from core.conversation import Conversation
-from core.tool_framework import ToolRegistry
+from core.tool_framework import ToolCapability, ToolRegistry
 from assistant.agent_runner import AgentRunner
-from assistant.chat_stream import stream_agent_events
+from assistant.execution_gateway import ExecutionContext, RegistryExecutionGateway, RunPolicy
+from assistant.run_recorder import (
+    AgentRunRecord, InvalidContinuation, ResumeClaimConflict, SqlAlchemyRunRecorder,
+)
+from assistant.chat_stream import stream_agent_events, stream_resume_events
+from assistant.resume_service import ApprovalResumeService
 from core.tools.calculator import CalculatorTool
 from core.tools.datetime_tools import CurrentDatetimeTool, UserTimezoneTool, UserLocaleTool, DateMathTool
 from core.tools.user_location import UserLocationTool
@@ -83,6 +88,18 @@ class RegisterRequest(BaseModel):
     display_name: str | None = None
 
 
+class RunPolicyRequest(BaseModel):
+    """Optional client restrictions; these can only reduce server authority."""
+
+    allowed_capabilities: set[ToolCapability] | None = None
+    allowed_tools: set[str] | None = None
+    max_tool_calls: int | None = Field(default=None, ge=0)
+    max_calls_per_tool: int | None = Field(default=None, ge=0)
+    max_cumulative_tool_execution_seconds: float | None = Field(default=None, ge=0)
+    approval_required_capabilities: set[ToolCapability] | None = None
+    approval_required_tools: set[str] | None = None
+
+
 class ChatRequest(BaseModel):
     messages: list[dict[str, Any]]
     thread_id: str | None = None
@@ -90,6 +107,7 @@ class ChatRequest(BaseModel):
     # idempotent chat submission (a retry of an already-accepted message is
     # rejected with 409 instead of duplicating the message/execution).
     client_message_id: str | None = None
+    execution_policy: RunPolicyRequest | None = None
 
 
 class SkillToggleRequest(BaseModel):
@@ -109,9 +127,116 @@ class FeedbackRequest(BaseModel):
     message_id: int
 
 
+class ApprovalDecisionRequest(BaseModel):
+    expected_fingerprint: str
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class PendingApprovalItem(BaseModel):
+    run_id: str
+    action_id: str
+    tool_name: str
+    fingerprint: str
+    required_capabilities: list[str]
+    arguments_preview: Any | None = None
+    requested_at: str
+    expires_at: str
+    decision: str | None = None
+    status: str
+
+
+class PendingApprovalsResponse(BaseModel):
+    approvals: list[PendingApprovalItem]
+
+
 # ── Config ─────────────────────────────────────────────────────────────────
 
 config = Config(project_root=Path(__file__).resolve().parent.parent.parent)
+
+# These are server-side ceilings, intentionally independent from user tool
+# toggles. A client can request a narrower run policy but cannot widen them.
+SERVER_RUN_POLICY = RunPolicy(
+    allowed_capabilities=frozenset(ToolCapability),
+    allowed_tools=None,
+    max_tool_calls=100,
+    max_calls_per_tool=25,
+    max_cumulative_tool_execution_seconds=300.0,
+    approval_required_capabilities=frozenset({ToolCapability.WORKSPACE_WRITE, ToolCapability.MEMORY_WRITE}),
+    approval_required_tools=None,
+)
+
+
+def build_effective_run_policy(
+    requested: RunPolicyRequest | None,
+    *,
+    server_policy: RunPolicy = SERVER_RUN_POLICY,
+) -> RunPolicy:
+    """Intersect typed client restrictions with immutable server ceilings."""
+    if requested is None:
+        return server_policy
+
+    capabilities = server_policy.allowed_capabilities
+    if requested.allowed_capabilities is not None:
+        capabilities = capabilities & frozenset(requested.allowed_capabilities)
+
+    if server_policy.allowed_tools is None:
+        allowed_tools = (
+            frozenset(requested.allowed_tools)
+            if requested.allowed_tools is not None else None
+        )
+    elif requested.allowed_tools is None:
+        allowed_tools = server_policy.allowed_tools
+    else:
+        allowed_tools = server_policy.allowed_tools & frozenset(requested.allowed_tools)
+
+    approval_capabilities = server_policy.approval_required_capabilities
+    if requested.approval_required_capabilities is not None:
+        approval_capabilities = approval_capabilities | frozenset(requested.approval_required_capabilities)
+    if server_policy.approval_required_tools is None:
+        approval_tools = frozenset(requested.approval_required_tools) if requested.approval_required_tools is not None else None
+    elif requested.approval_required_tools is None:
+        approval_tools = server_policy.approval_required_tools
+    else:
+        approval_tools = server_policy.approval_required_tools | frozenset(requested.approval_required_tools)
+
+    return RunPolicy(
+        allowed_capabilities=capabilities,
+        allowed_tools=allowed_tools,
+        max_tool_calls=min(requested.max_tool_calls, server_policy.max_tool_calls)
+        if requested.max_tool_calls is not None else server_policy.max_tool_calls,
+        max_calls_per_tool=min(
+            requested.max_calls_per_tool,
+            server_policy.max_calls_per_tool,
+        ) if (
+            requested.max_calls_per_tool is not None
+            and server_policy.max_calls_per_tool is not None
+        ) else (
+            requested.max_calls_per_tool
+            if server_policy.max_calls_per_tool is None
+            else server_policy.max_calls_per_tool
+        ),
+        max_cumulative_tool_execution_seconds=min(
+            requested.max_cumulative_tool_execution_seconds,
+            server_policy.max_cumulative_tool_execution_seconds,
+        ) if requested.max_cumulative_tool_execution_seconds is not None else (
+            server_policy.max_cumulative_tool_execution_seconds
+        ),
+        approval_required_capabilities=approval_capabilities,
+        approval_required_tools=approval_tools,
+    )
+
+
+def run_policy_snapshot(policy: RunPolicy) -> dict[str, Any]:
+    """Serialize the immutable effective policy for the durable run record."""
+    return {
+        "allowed_capabilities": sorted(capability.value for capability in policy.allowed_capabilities),
+        "allowed_tools": sorted(policy.allowed_tools) if policy.allowed_tools is not None else None,
+        "max_tool_calls": policy.max_tool_calls,
+        "max_calls_per_tool": policy.max_calls_per_tool,
+        "max_cumulative_tool_execution_seconds": policy.max_cumulative_tool_execution_seconds,
+        "approval_required_capabilities": sorted(capability.value for capability in policy.approval_required_capabilities),
+        "approval_required_tools": sorted(policy.approval_required_tools) if policy.approval_required_tools is not None else None,
+    }
 
 # ── System prompt ─────────────────────────────────────────────────────────
 
@@ -221,6 +346,28 @@ def _build_tool_registry(user_id: str, db: AsyncSession) -> ToolRegistry:
     registry.register(RecallTool(personal_memory, user_id=user_id))
     registry.register(GetSkillContentTool(db=db, user_id=int(user_id)))
     return registry
+
+
+def _build_resume_service(db: AsyncSession) -> ApprovalResumeService:
+    """Construct the server dependencies for one already-authenticated resume."""
+    llm = LLMClient(config)
+
+    async def registry_factory(user_id: int) -> ToolRegistry:
+        tools = _build_tool_registry(str(user_id), db)
+        enabled = await tool_store.get_enabled_tool_names(db, user_id)
+        return tools.filtered(enabled | tool_store.ALWAYS_ENABLED)
+
+    def runner_factory(tools: ToolRegistry, executor: RegistryExecutionGateway) -> AgentRunner:
+        return AgentRunner(
+            llm=llm, tools=tools, max_turns=config.max_agent_turns,
+            tool_timeout=config.tool_timeout, executor=executor,
+        )
+
+    return ApprovalResumeService(
+        recorder=SqlAlchemyRunRecorder(db), registry_factory=registry_factory,
+        current_policy=lambda: SERVER_RUN_POLICY, runner_factory=runner_factory,
+        tool_timeout=config.tool_timeout,
+    )
 
 
 # ── Auth helpers ─────────────────────────────────────────────────────────
@@ -392,14 +539,19 @@ async def create_thread(
     return await thread_store.create_thread(db, user_id, req.title)
 
 
-async def _get_thread_usage_summary(db: AsyncSession, thread_id: str) -> str | None:
+async def _get_thread_usage_summary(
+    db: AsyncSession, thread_id: str, user_id: int
+) -> str | None:
     result = await db.execute(
         select(
             func.count().label("turns"),
             func.coalesce(func.sum(LlmCallLog.total_tokens), 0).label("total_tokens"),
             func.coalesce(func.sum(LlmCallLog.cached_tokens), 0).label("cached_tokens"),
             func.coalesce(func.sum(LlmCallLog.latency_ms), 0).label("total_latency_ms"),
-        ).where(LlmCallLog.thread_id == thread_id)
+        ).where(
+            LlmCallLog.thread_id == thread_id,
+            LlmCallLog.user_id == user_id,
+        )
     )
     row = result.one()
     turns = row.turns
@@ -430,12 +582,12 @@ async def get_thread(
     thread_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    await _get_user_id(request, db)
-    thread = await thread_store.get_thread(db, thread_id)
+    user_id = await _get_user_id(request, db)
+    thread = await thread_store.get_thread_for_user(db, thread_id, user_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
-    messages = await thread_store.get_messages(db, thread_id)
-    usage = await _get_thread_usage_summary(db, thread_id)
+    messages = await thread_store.get_messages_for_user(db, thread_id, user_id)
+    usage = await _get_thread_usage_summary(db, thread_id, user_id)
     return {"thread": thread, "messages": messages, "usage": usage}
 
 
@@ -445,8 +597,10 @@ async def delete_thread(
     thread_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    await _get_user_id(request, db)
-    await thread_store.delete_thread(db, thread_id)
+    user_id = await _get_user_id(request, db)
+    deleted = await thread_store.delete_thread(db, thread_id, user_id=user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Thread not found")
     return {"ok": True}
 
 
@@ -457,8 +611,10 @@ async def update_thread_title(
     req: UpdateTitleRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    await _get_user_id(request, db)
-    result = await thread_store.update_thread_title(db, thread_id, req.title)
+    user_id = await _get_user_id(request, db)
+    result = await thread_store.update_thread_title(
+        db, thread_id, req.title, user_id=user_id
+    )
     if not result:
         raise HTTPException(status_code=404, detail="Thread not found")
     return result
@@ -477,7 +633,10 @@ async def submit_feedback(
     user = await _get_user(request, db)
     user_id = user["id"]
 
-    messages = await thread_store.get_messages(db, thread_id)
+    thread = await thread_store.get_thread_for_user(db, thread_id, user_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    messages = await thread_store.get_messages_for_user(db, thread_id, user_id)
     if not messages:
         raise HTTPException(status_code=404, detail="Thread not found")
 
@@ -574,12 +733,15 @@ async def chat(
 ):
     user = await _get_user(request, db)
     user_id = str(user["id"])
+    run_policy = build_effective_run_policy(req.execution_policy)
 
     thread_id = req.thread_id
     is_new_thread = not thread_id
     if not thread_id:
         thread = await thread_store.create_thread(db, user["id"])
         thread_id = thread["thread_id"]
+    elif not await thread_store.get_thread_for_user(db, thread_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Thread not found")
 
     user_msg = req.messages[-1] if req.messages else None
     saves_user_message = bool(user_msg and user_msg.get("role") == "user")
@@ -590,7 +752,7 @@ async def chat(
     # read below alone cannot protect against two racing requests.
     if saves_user_message and req.client_message_id:
         existing = await thread_store.get_message_by_client_id(
-            db, thread_id, req.client_message_id
+            db, thread_id, req.client_message_id, user_id=user["id"]
         )
         if existing:
             logger.info(
@@ -690,13 +852,34 @@ async def chat(
                     result=content,
                 )
 
+        request_id = uuid.uuid4().hex[:12]
+        run_id = uuid.uuid4().hex
+        recorder = SqlAlchemyRunRecorder(db)
+        await recorder.create_run(AgentRunRecord(
+            run_id=run_id,
+            request_id=request_id,
+            user_id=user["id"],
+            thread_id=thread_id,
+            policy_snapshot=run_policy_snapshot(run_policy),
+        ))
         runner = AgentRunner(
             llm=llm,
             tools=tools,
             max_turns=config.max_agent_turns,
             tool_timeout=config.tool_timeout,
+            executor=RegistryExecutionGateway(
+                tools,
+                ExecutionContext(
+                    user_id=user["id"],
+                    thread_id=thread_id,
+                    request_id=request_id,
+                    run_id=run_id,
+                ),
+                run_policy,
+                tool_timeout=config.tool_timeout,
+                recorder=recorder,
+            ),
         )
-        request_id = uuid.uuid4().hex[:12]
 
         async for chunk in stream_agent_events(
             runner=runner,
@@ -710,6 +893,8 @@ async def chat(
             llm=llm,
             generate_title=is_new_thread and bool(first_user_msg),
             first_user_msg=first_user_msg,
+            recorder=recorder,
+            run_id=run_id,
         ):
             yield chunk
 
@@ -723,6 +908,102 @@ async def chat(
             "X-Thread-Id": thread_id,
         },
     )
+
+
+@app.post("/api/runs/{run_id}/resume")
+async def resume_run(
+    request: Request, run_id: str, db: AsyncSession = Depends(get_db),
+):
+    """Claim and stream a waiting approval-paused run for its owner."""
+    user = await _get_user(request, db)
+    # A resume is intentionally identity-only; accepting JSON here risks
+    # accidentally turning request data into execution authority later.
+    if (await request.body()).strip():
+        raise HTTPException(status_code=422, detail="Resume does not accept a request body")
+    service = _build_resume_service(db)
+    try:
+        session = await service.prepare(user_id=user["id"], run_id=run_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Run not found")
+    except ResumeClaimConflict:
+        raise HTTPException(status_code=409, detail="Run is not available to resume")
+    except InvalidContinuation:
+        raise HTTPException(status_code=422, detail="Run continuation is not valid")
+
+    async def event_stream():
+        async for chunk in stream_resume_events(
+            events=session.events(), db=db, thread_id=session.run.thread_id,
+            user_id=user["id"], request_id=session.run.request_id,
+            model=config.llm_model, provider=config.llm_provider, cancel=session.cancel,
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        event_stream(), media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache", "Connection": "keep-alive",
+            "X-Accel-Buffering": "no", "X-Thread-Id": session.run.thread_id,
+        },
+    )
+
+
+@app.get("/api/runs/{run_id}/actions/{action_id}/approval")
+async def get_action_approval(request: Request, run_id: str, action_id: str, db: AsyncSession = Depends(get_db)):
+    user = await _get_user(request, db)
+    recorder = SqlAlchemyRunRecorder(db)
+    row = await recorder.get_pending_approval_for_user(run_id, action_id, user["id"])
+    if row is None:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    action, approval = row
+    if action.status != "pending_approval":
+        raise HTTPException(status_code=404, detail="Approval not found")
+    return {
+        "action_id": action.action_id, "run_id": action.run_id, "tool_name": action.tool_name,
+        "fingerprint": approval.fingerprint, "required_capabilities": action.required_capabilities,
+        "arguments_preview": action.canonical_arguments,
+        "requested_at": action.created_at.isoformat(), "expires_at": approval.expires_at.isoformat(),
+    }
+
+
+@app.get("/api/threads/{thread_id}/pending-approvals", response_model=PendingApprovalsResponse)
+async def get_pending_approvals(request: Request, thread_id: str, db: AsyncSession = Depends(get_db)):
+    """Return safe waiting-approval presentations so clients can recover SSE loss."""
+    user = await _get_user(request, db)
+    if not await thread_store.get_thread_for_user(db, thread_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Thread not found")
+    recorder = SqlAlchemyRunRecorder(db)
+    presentations = await recorder.get_pending_approvals_for_thread(thread_id, user["id"])
+    return PendingApprovalsResponse(
+        approvals=[PendingApprovalItem(**item.to_dict()) for item in presentations]
+    )
+
+
+async def _decide_action_approval(request: Request, run_id: str, action_id: str, req: ApprovalDecisionRequest, db: AsyncSession, decision: str):
+    user = await _get_user(request, db)
+    recorder = SqlAlchemyRunRecorder(db)
+    try:
+        approval = await recorder.decide_approval_for_user(run_id, action_id, user["id"], req.expected_fingerprint, decision, req.reason)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="Approval fingerprint is stale")
+    except RuntimeError:
+        raise HTTPException(status_code=409, detail="Approval already has a conflicting decision")
+    except TimeoutError:
+        raise HTTPException(status_code=409, detail="Approval has expired")
+    except Exception:
+        raise HTTPException(status_code=409, detail="Approval is no longer pending")
+    if approval is None:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    return {"action_id": action_id, "run_id": run_id, "decision": approval.decision, "expires_at": approval.expires_at.isoformat()}
+
+
+@app.post("/api/runs/{run_id}/actions/{action_id}/approve")
+async def approve_action(request: Request, run_id: str, action_id: str, req: ApprovalDecisionRequest, db: AsyncSession = Depends(get_db)):
+    return await _decide_action_approval(request, run_id, action_id, req, db, "approved")
+
+
+@app.post("/api/runs/{run_id}/actions/{action_id}/deny")
+async def deny_action(request: Request, run_id: str, action_id: str, req: ApprovalDecisionRequest, db: AsyncSession = Depends(get_db)):
+    return await _decide_action_approval(request, run_id, action_id, req, db, "denied")
 
 
 # ── Geo endpoint ──────────────────────────────────────────────────────────

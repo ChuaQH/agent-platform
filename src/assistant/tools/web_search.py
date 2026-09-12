@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ class WebSearchTool(Tool):
     """Search the web via Brave Search API and return results."""
 
     name = "web_search"
+    capabilities = frozenset({ToolCapability.NETWORK_READ})
     description = (
         "Search the web for current information. "
         "Use when you need facts, news, or documentation that may have "

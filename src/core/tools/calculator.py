@@ -7,7 +7,7 @@ import math
 import operator
 from typing import Any
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 
 # Allowed operators and functions (no eval, no __import__, etc.)
 _ALLOWED_OPS: dict[type, Any] = {
@@ -61,6 +61,7 @@ class CalculatorTool(Tool):
     """Evaluate mathematical expressions safely."""
 
     name = "calculator"
+    capabilities = frozenset({ToolCapability.COMPUTE})
     description = (
         "Evaluate a mathematical expression safely. "
         "Supports basic arithmetic, trigonometry, logarithms, and constants (pi, e). "

@@ -58,25 +58,53 @@ async def get_thread(db: AsyncSession, thread_id: str) -> dict | None:
     return thread.to_dict() if thread else None
 
 
-async def delete_thread(db: AsyncSession, thread_id: str) -> None:
+async def get_thread_for_user(
+    db: AsyncSession, thread_id: str, user_id: int
+) -> dict | None:
+    """Return a thread only when it belongs to the authenticated user."""
     result = await db.execute(
-        select(ThreadState).where(ThreadState.thread_id == thread_id)
+        select(ThreadState).where(
+            ThreadState.thread_id == thread_id,
+            ThreadState.user_id == user_id,
+        )
     )
     thread = result.scalar_one_or_none()
-    if thread:
-        await db.delete(thread)
-        await db.commit()
+    return thread.to_dict() if thread else None
+
+
+async def delete_thread(
+    db: AsyncSession, thread_id: str, *, user_id: int | None = None
+) -> bool:
+    result = await db.execute(
+        select(ThreadState).where(
+            ThreadState.thread_id == thread_id,
+            *([ThreadState.user_id == user_id] if user_id is not None else []),
+        )
+    )
+    thread = result.scalar_one_or_none()
+    if not thread:
+        return False
+    await db.delete(thread)
+    await db.commit()
+    return True
 
 
 async def update_thread_title(
-    db: AsyncSession, thread_id: str, title: str
+    db: AsyncSession, thread_id: str, title: str, *, user_id: int | None = None
 ) -> dict | None:
-    await db.execute(
+    conditions = [ThreadState.thread_id == thread_id]
+    if user_id is not None:
+        conditions.append(ThreadState.user_id == user_id)
+    result = await db.execute(
         update(ThreadState)
-        .where(ThreadState.thread_id == thread_id)
+        .where(*conditions)
         .values(title=title, updated_at=datetime.now(timezone.utc))
     )
+    if result.rowcount == 0:
+        return None
     await db.commit()
+    if user_id is not None:
+        return await get_thread_for_user(db, thread_id, user_id)
     return await get_thread(db, thread_id)
 
 
@@ -87,6 +115,22 @@ async def get_messages(db: AsyncSession, thread_id: str) -> list[dict]:
     result = await db.execute(
         select(ConversationMessage)
         .where(ConversationMessage.thread_id == thread_id)
+        .order_by(ConversationMessage.created_at.asc())
+    )
+    return [m.to_dict() for m in result.scalars().all()]
+
+
+async def get_messages_for_user(
+    db: AsyncSession, thread_id: str, user_id: int
+) -> list[dict]:
+    """Return messages only from a thread owned by ``user_id``."""
+    result = await db.execute(
+        select(ConversationMessage)
+        .join(ThreadState, ConversationMessage.thread_id == ThreadState.thread_id)
+        .where(
+            ConversationMessage.thread_id == thread_id,
+            ThreadState.user_id == user_id,
+        )
         .order_by(ConversationMessage.created_at.asc())
     )
     return [m.to_dict() for m in result.scalars().all()]
@@ -132,7 +176,11 @@ async def save_message(
 
 
 async def get_message_by_client_id(
-    db: AsyncSession, thread_id: str, client_message_id: str
+    db: AsyncSession,
+    thread_id: str,
+    client_message_id: str,
+    *,
+    user_id: int | None = None,
 ) -> dict | None:
     """Look up a message by its client-generated id within a thread.
 
@@ -140,12 +188,13 @@ async def get_message_by_client_id(
     ``(thread_id, client_message_id)`` remains the authoritative guard
     against duplicate submissions racing past this read.
     """
-    result = await db.execute(
-        select(ConversationMessage).where(
-            ConversationMessage.thread_id == thread_id,
-            ConversationMessage.client_message_id == client_message_id,
-        )
-    )
+    conditions = [
+        ConversationMessage.thread_id == thread_id,
+        ConversationMessage.client_message_id == client_message_id,
+    ]
+    if user_id is not None:
+        conditions.append(ConversationMessage.user_id == user_id)
+    result = await db.execute(select(ConversationMessage).where(*conditions))
     msg = result.scalar_one_or_none()
     return msg.to_dict() if msg else None
 

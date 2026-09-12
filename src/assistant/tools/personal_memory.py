@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 from assistant.memory.personal import PersonalMemory
 
 logger = logging.getLogger(__name__)
@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 class RememberTool(Tool):
     name = "assistant_remember"
+    capabilities = frozenset({ToolCapability.MEMORY_WRITE})
     description = (
         "Store a fact or preference for future conversations. "
         "Use memory_type='user' for personal facts (name, preferences, location) "
@@ -59,6 +60,7 @@ class RememberTool(Tool):
 
 class RecallTool(Tool):
     name = "assistant_recall"
+    capabilities = frozenset({ToolCapability.MEMORY_READ})
     description = (
         "Recall facts and preferences from past conversations. "
         "Use memory_type='user' to search personal facts, "

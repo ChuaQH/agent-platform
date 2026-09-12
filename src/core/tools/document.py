@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 from core.tools.file_io import _resolve, _DEFAULT_WORKSPACE
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 class ExtractTextTool(Tool):
     name = "extract_text"
+    capabilities = frozenset({ToolCapability.WORKSPACE_READ})
     description = (
         "Extract readable text from a file in the workspace. "
         "Supports PDF (.pdf) and plain text (.txt, .md, .py, etc.) files. "
@@ -80,6 +81,7 @@ class ExtractTextTool(Tool):
 
 class ReadSpreadsheetTool(Tool):
     name = "read_spreadsheet"
+    capabilities = frozenset({ToolCapability.WORKSPACE_READ})
     description = (
         "Read a spreadsheet file from the workspace. "
         "Supports .xlsx, .xlsm, and .csv formats. "

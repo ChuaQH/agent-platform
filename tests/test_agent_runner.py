@@ -9,12 +9,13 @@ event stream produced, and the final conversation state.
 """
 
 import asyncio
+import json
 
 import pytest
 
 from core.conversation import Conversation
 from core.llm_client import LLMResponse
-from core.tool_framework import Tool, ToolRegistry
+from core.tool_framework import Tool, ToolCapability, ToolRegistry
 from core.tools.calculator import CalculatorTool
 from assistant.agent_runner import AgentExecutionError, AgentRunner
 
@@ -33,6 +34,7 @@ class FailingTool(Tool):
     """Tool whose execution always raises."""
 
     name = "boom"
+    capabilities = frozenset({ToolCapability.COMPUTE})
     description = "Always fails."
     parameters = {"type": "object", "properties": {}, "required": []}
 
@@ -44,6 +46,7 @@ class RecordingTool(Tool):
     """Stub tool that records whether it was executed."""
 
     name = "recording_probe"
+    capabilities = frozenset({ToolCapability.COMPUTE})
     description = "Probe tool that records executions."
     parameters = {}
 
@@ -112,6 +115,10 @@ def test_single_tool_call_then_final_text() -> None:
         "name": "calculator",
         "result": "2 + 3 = 5",
         "arguments": {"expression": "2 + 3"},
+        "status": "success",
+        "reason_code": None,
+        "required_capabilities": [],
+        "limit_name": None,
     }
 
     # The second LLM call sees the tool result appended to the conversation.
@@ -120,7 +127,9 @@ def test_single_tool_call_then_final_text() -> None:
     tool_msg = second_call_messages[-1]
     assert tool_msg["tool_call_id"] == "call_1"
     assert tool_msg["name"] == "calculator"
-    assert tool_msg["content"] == "2 + 3 = 5"
+    assert json.loads(tool_msg["content"]) == {
+        "status": "success", "tool": "calculator", "result": "2 + 3 = 5",
+    }
 
     assert result.final_text == "The answer is 5."
     assert result.turns == 2
@@ -160,7 +169,7 @@ def test_multiple_sequential_tool_calls_keep_ordering() -> None:
     third_call_messages = llm.captured_messages[2]
     roles = [m["role"] for m in third_call_messages]
     assert roles == ["system", "user", "assistant", "tool", "assistant", "tool"]
-    assert [m["content"] for m in third_call_messages if m["role"] == "tool"] == [
+    assert [json.loads(m["content"])["result"] for m in third_call_messages if m["role"] == "tool"] == [
         "1 + 1 = 2", "2 * 2 = 4",
     ]
     assert result.final_text == "Done."
@@ -195,7 +204,7 @@ def test_unknown_tool_is_rejected_at_execution_without_running() -> None:
     tool_result_event = events[2]
     assert tool_result_event.data["result"] == "Error: tool 'recording_probe' not found"
     second_call_messages = llm.captured_messages[1]
-    assert second_call_messages[-1]["content"] == "Error: tool 'recording_probe' not found"
+    assert json.loads(second_call_messages[-1]["content"])["status"] == "unavailable_tool"
     assert result.final_text == "I could not do that."
 
 
@@ -225,7 +234,7 @@ def test_tool_exception_is_contained_and_loop_continues() -> None:
     # surfaced as a controlled tool-result error: no raw exception text,
     # no traceback reaching the caller, loop continues.
     assert events[2].data["result"] == "Error executing tool 'boom'"
-    assert llm.captured_messages[1][-1]["content"] == "Error executing tool 'boom'"
+    assert json.loads(llm.captured_messages[1][-1]["content"])["status"] == "execution_failure"
     assert result.final_text == "That failed."
 
 
@@ -336,6 +345,7 @@ class SlowTool(Tool):
     """Tool that never completes on its own within a test-scale timeout."""
 
     name = "slow"
+    capabilities = frozenset({ToolCapability.COMPUTE})
     description = "Sleeps forever."
     parameters = {}
 
@@ -369,7 +379,7 @@ def test_tool_timeout_returns_controlled_error_and_loop_continues() -> None:
         "llm_call", "tool_call", "tool_result", "llm_call", "text",
     ]
     assert events[2].data["result"] == "Error executing tool 'slow': timed out after 0.01s"
-    assert llm.captured_messages[1][-1]["content"].startswith("Error executing tool 'slow': timed out")
+    assert json.loads(llm.captured_messages[1][-1]["content"])["status"] == "timeout"
     assert result.final_text == "It timed out."
 
 
@@ -423,6 +433,7 @@ def test_cancellation_during_llm_call_stops_execution_cleanly() -> None:
 def test_cancellation_during_tool_execution_stops_further_work() -> None:
     class HangingTool(Tool):
         name = "hang"
+        capabilities = frozenset({ToolCapability.COMPUTE})
         description = "Waits forever."
         parameters = {}
 

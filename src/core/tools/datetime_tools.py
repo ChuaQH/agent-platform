@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 
 
 def _get_local_tz() -> timezone:
@@ -54,6 +54,7 @@ def _get_system_locale() -> str:
 
 class CurrentDatetimeTool(Tool):
     name = "get_current_datetime"
+    capabilities = frozenset({ToolCapability.USER_CONTEXT_READ})
     description = (
         "Get the current date and time. "
         "Accepts an optional IANA timezone (e.g. 'America/New_York', 'Asia/Tokyo'). "
@@ -88,6 +89,7 @@ class CurrentDatetimeTool(Tool):
 
 class UserTimezoneTool(Tool):
     name = "get_user_timezone"
+    capabilities = frozenset({ToolCapability.USER_CONTEXT_READ})
     description = (
         "Get the user's local timezone. "
         "Accepts an optional IANA timezone to validate. "
@@ -123,6 +125,7 @@ class UserTimezoneTool(Tool):
 
 class UserLocaleTool(Tool):
     name = "get_user_locale"
+    capabilities = frozenset({ToolCapability.USER_CONTEXT_READ})
     description = "Get the user's system locale."
     when_to_use = "When you need the user's locale for formatting dates, numbers, or currency."
     how_to_use = "No arguments required. Returns a locale string (e.g., 'en_US')."
@@ -138,6 +141,7 @@ class UserLocaleTool(Tool):
 
 class DateMathTool(Tool):
     name = "date_math"
+    capabilities = frozenset({ToolCapability.COMPUTE, ToolCapability.USER_CONTEXT_READ})
     description = (
         "Perform date arithmetic. Provide a natural language expression. "
         "Accepts an optional IANA timezone (e.g. 'America/New_York'). "

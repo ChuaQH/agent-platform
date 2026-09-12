@@ -9,9 +9,23 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class ToolCapability(str, Enum):
+    """Closed set of execution capabilities declared by every tool."""
+
+    COMPUTE = "compute"
+    NETWORK_READ = "network_read"
+    USER_CONTEXT_READ = "user_context_read"
+    WORKSPACE_READ = "workspace_read"
+    WORKSPACE_WRITE = "workspace_write"
+    MEMORY_READ = "memory_read"
+    MEMORY_WRITE = "memory_write"
+    SKILL_READ = "skill_read"
 
 
 @dataclass
@@ -36,6 +50,11 @@ class Tool(ABC):
     parameters: dict[str, Any] = {}
     when_to_use: str | None = None
     how_to_use: str | None = None
+    # Subclasses must override this with a non-empty frozenset of
+    # ToolCapability values. The gateway deliberately fails closed otherwise.
+    capabilities: frozenset[ToolCapability] | None = None
+    # Optional tool-owned additions to the centralized durable-record redactor.
+    sensitive_argument_fields: frozenset[str] = frozenset()
 
     @abstractmethod
     async def execute(self, **params: Any) -> str:
@@ -101,17 +120,34 @@ class ToolRegistry:
         surfaced to the model as a controlled message WITHOUT the raw
         exception text, so internal details never reach the LLM or client.
         """
+        return (await self.execute_result(name, **params)).content
+
+    async def execute_result(self, name: str, **params: Any) -> ToolResult:
+        """Execute a tool and retain a normalized low-level failure signal.
+
+        ``execute`` remains the backwards-compatible string-returning API.
+        Gateways that need to distinguish a controlled execution failure from a
+        successful tool response should use this method.
+        """
         tool = self._tools.get(name)
         if tool is None:
-            return f"Error: tool '{name}' not found"
+            return ToolResult(
+                name=name,
+                content=f"Error: tool '{name}' not found",
+                error="tool_not_found",
+            )
         try:
-            return await tool.execute(**params)
+            return ToolResult(name=name, content=await tool.execute(**params))
         except Exception:
             logger.error(
                 "Tool '%s' raised an unhandled exception", name,
                 exc_info=True,
             )
-            return f"Error executing tool '{name}'"
+            return ToolResult(
+                name=name,
+                content=f"Error executing tool '{name}'",
+                error="tool_execution_failed",
+            )
 
     def to_openai_schemas(self) -> list[dict[str, Any]]:
         """Export all tools as OpenAI-compatible function definitions."""

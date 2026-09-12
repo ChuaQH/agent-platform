@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ class WebFetchTool(Tool):
     """Fetch a URL and extract readable text content."""
 
     name = "web_fetch"
+    capabilities = frozenset({ToolCapability.NETWORK_READ})
     description = (
         "Fetch the content of a URL and extract readable text. "
         "Use this after web_search to read a specific page in detail. "

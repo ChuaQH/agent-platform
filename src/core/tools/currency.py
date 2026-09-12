@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +16,7 @@ _API_URL = "https://open.er-api.com/v6/latest"
 
 class CurrencyTool(Tool):
     name = "currency_convert"
+    capabilities = frozenset({ToolCapability.NETWORK_READ})
     description = (
         "Convert an amount between currencies using live exchange rates. "
         "Provide the amount, source currency, and target currency. "

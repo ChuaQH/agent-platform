@@ -117,12 +117,17 @@ def test_success_stream_persists_tool_messages() -> None:
     # SSE tool_result payload excludes internal arguments.
     assert events[1]["id"] == "call_1"
     assert "arguments" not in events[1]
+    assert events[1]["status"] == "success"
 
     tool_saves = [m for m in db.added if getattr(m, "role", "") == "tool"]
     assert len(tool_saves) == 1
     assert tool_saves[0].tool_result == {
         "result": "2 + 3 = 5",
         "arguments": {"expression": "2 + 3"},
+        "status": "success",
+        "reason_code": None,
+        "required_capabilities": [],
+        "limit_name": None,
     }
 
 

@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 from assistant import skill_store
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,7 @@ class GetSkillContentTool(Tool):
     """Retrieve the full instructions for an enabled skill."""
 
     name = "get_skill_content"
+    capabilities = frozenset({ToolCapability.SKILL_READ})
     description = (
         "Retrieve the full instructions for a specific skill. "
         "Use this when you need the complete guidance for a skill listed in the Enabled Skills section."

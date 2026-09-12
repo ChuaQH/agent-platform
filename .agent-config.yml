@@ -4,7 +4,7 @@
 # LLM
 llm:
   provider: deepseek
-  model: deepseek-v4-pro
+  model: deepseek-flash
   # API key read from DEEPSEEK_API_KEY environment variable
   max_tokens: 8192
   temperature: 0.0

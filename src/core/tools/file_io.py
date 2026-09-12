@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ def _resolve(path: str, workspace: Path) -> Path:
 
 class ReadFileTool(Tool):
     name = "read_file"
+    capabilities = frozenset({ToolCapability.WORKSPACE_READ})
     description = (
         "Read the contents of a file from the workspace. "
         "Returns the file content as text. Large files are truncated. "
@@ -84,14 +85,15 @@ class ReadFileTool(Tool):
 
 class WriteFileTool(Tool):
     name = "write_file"
+    capabilities = frozenset({ToolCapability.WORKSPACE_WRITE})
     description = (
         "Write content to a file in the workspace. "
         "Creates parent directories if needed. "
         "⚠️ This overwrites existing files — use with care. "
-        "Set 'confirmed' to true to proceed."
+        "Execution requires a separate server-side approval."
     )
     when_to_use = "When the user asks to save or write content to a file. Requires user confirmation."
-    how_to_use = "Provide the file path, content, and set confirmed=true to actually write."
+    how_to_use = "Provide the file path and content; server-side approval controls execution."
     parameters = {
         "type": "object",
         "properties": {
@@ -103,27 +105,19 @@ class WriteFileTool(Tool):
                 "type": "string",
                 "description": "The text content to write.",
             },
-            "confirmed": {
-                "type": "boolean",
-                "description": "Must be true to actually write. Set to false to preview.",
-            },
         },
-        "required": ["path", "content", "confirmed"],
+        "required": ["path", "content"],
     }
 
     def __init__(self, workspace: Path | None = None):
         self.workspace = Path(workspace or _DEFAULT_WORKSPACE).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
 
-    async def execute(self, path: str = "", content: str = "", confirmed: bool = False, **kwargs: Any) -> str:
+    async def execute(self, path: str = "", content: str = "", **kwargs: Any) -> str:
         try:
             target = _resolve(path, self.workspace)
         except ValueError as e:
             return f"Error: {e}"
-
-        if not confirmed:
-            preview = content[:200] + ("..." if len(content) > 200 else "")
-            return f"Preview of {path}:\n\n{preview}\n\nSet confirmed=true to write."
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)

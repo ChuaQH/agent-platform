@@ -11,12 +11,14 @@ from typing import Any
 
 import httpx
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 from core.user_context import get_location, request_location, clear_pending
 
 
 class UserLocationTool(Tool):
     name = "get_user_location"
+    # Reads browser-provided location and may reverse-geocode it remotely.
+    capabilities = frozenset({ToolCapability.USER_CONTEXT_READ, ToolCapability.NETWORK_READ})
     description = (
         "Get the user's geographic location (city, region, country). "
         "Calling this will show a button for the user to share their "

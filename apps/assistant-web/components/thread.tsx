@@ -13,6 +13,8 @@ import { TooltipIconButton } from "@/components/tooltip-icon-button";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { ApprovalCards } from "@/components/approval-card";
+import { useApprovals } from "@/lib/approval-context";
 import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
@@ -134,6 +136,8 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             </ThreadPrimitive.Messages>
           </div>
 
+          <ApprovalCards />
+
           <ThreadPrimitive.ViewportFooter
             className={cn(
               "aui-thread-viewport-footer bg-background flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
@@ -215,6 +219,7 @@ const ThreadSuggestionItem: FC = () => {
 };
 
 const Composer: FC = () => {
+  const { hasWaitingApproval } = useApprovals();
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ComposerPrimitive.AttachmentDropzone asChild>
@@ -229,6 +234,7 @@ const Composer: FC = () => {
             rows={1}
             autoFocus
             aria-label="Message input"
+            disabled={hasWaitingApproval}
           />
           <ComposerAction />
         </div>
@@ -238,6 +244,7 @@ const Composer: FC = () => {
 };
 
 const ComposerAction: FC = () => {
+  const { hasWaitingApproval } = useApprovals();
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
       <ComposerAddAttachment />
@@ -284,6 +291,7 @@ const ComposerAction: FC = () => {
               size="icon"
               className="aui-composer-send size-7 rounded-full"
               aria-label="Send message"
+              disabled={hasWaitingApproval}
             >
               <ArrowUpIcon className="aui-composer-send-icon size-4.5" />
             </TooltipIconButton>

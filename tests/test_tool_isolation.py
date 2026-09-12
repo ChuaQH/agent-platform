@@ -8,7 +8,7 @@ just hiding schemas from the LLM).
 
 import asyncio
 
-from core.tool_framework import Tool, ToolRegistry
+from core.tool_framework import Tool, ToolCapability, ToolRegistry
 from core.tools.calculator import CalculatorTool
 from core.tools.datetime_tools import CurrentDatetimeTool
 from core.tools.user_location import UserLocationTool
@@ -19,6 +19,7 @@ class RecordingTool(Tool):
     """Stub tool that records whether it was executed."""
 
     name = "recording_probe"
+    capabilities = frozenset({ToolCapability.COMPUTE})
     description = "Probe tool that records executions."
     parameters = {}
     when_to_use = "Only when explicitly probed."

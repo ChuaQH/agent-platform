@@ -11,6 +11,12 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { useThreadListAdapter, ThreadListRefreshContext } from "@/lib/thread-list-adapter";
 import { BackendMessageIdContext } from "@/lib/backend-ids";
 import { ThreadIdContext } from "@/lib/thread-id";
+import {
+  ApprovalProvider,
+  approvalStatusFromBackend,
+  type ApprovalState,
+  type PendingApprovalResponse,
+} from "@/lib/approval-context";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -40,17 +46,55 @@ export function MyRuntimeProvider({
   const abortRef = useRef<AbortController | null>(null);
   const [backendIds, setBackendIds] = useState<Map<string, number>>(new Map());
   const currentThreadIdRef = useRef<string | null>(null);
+  const [approvals, setApprovals] = useState<Record<string, ApprovalState>>({});
+  const approvalsRef = useRef<Record<string, ApprovalState>>({});
+
+  const setApproval = useCallback((approval: ApprovalState) => {
+    setApprovals((previous) => {
+      const next = { ...previous, [approval.action_id]: { ...previous[approval.action_id], ...approval } };
+      approvalsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const refreshApprovalsForThread = useCallback(async (id: string) => {
+    const token = getToken();
+    if (!token || currentThreadIdRef.current !== id) return;
+    const response = await fetch(`${API_URL}/api/threads/${id}/pending-approvals`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok || currentThreadIdRef.current !== id) return;
+    const data = await response.json() as { approvals?: PendingApprovalResponse[] };
+    const incoming = data.approvals || [];
+    setApprovals((previous) => {
+      if (currentThreadIdRef.current !== id) return previous;
+      const next = { ...previous };
+      for (const item of incoming) {
+        next[item.action_id] = {
+          ...next[item.action_id], ...item,
+          durableStatus: approvalStatusFromBackend(item.status ?? "pending_approval", item.decision ?? null),
+          uiStatus: next[item.action_id]?.uiStatus === "resuming" ? "resuming" : "idle",
+        };
+      }
+      approvalsRef.current = next;
+      return next;
+    });
+  }, []);
 
   const onSwitchToNewThread = useCallback(() => {
     setThreadId(null);
     setMessages([]);
     currentThreadIdRef.current = null;
+    approvalsRef.current = {};
+    setApprovals({});
   }, []);
 
   const onSwitchToThread = useCallback((id: string) => {
     setThreadId(id);
     setInitialLoading(true);
     currentThreadIdRef.current = id;
+    approvalsRef.current = {};
+    setApprovals({});
 
     (async () => {
       try {
@@ -150,15 +194,17 @@ export function MyRuntimeProvider({
             } as ThreadMessageLike;
           }
         }
+        if (currentThreadIdRef.current !== id) return;
         setMessages(msgs);
         setBackendIds(newIds);
+        await refreshApprovalsForThread(id);
       } catch {
         // ignore
       } finally {
-        setInitialLoading(false);
+        if (currentThreadIdRef.current === id) setInitialLoading(false);
       }
     })();
-  }, []);
+  }, [refreshApprovalsForThread]);
 
   // Track the active thread for sidebar highlighting
   const threadList = useThreadListAdapter({
@@ -167,8 +213,97 @@ export function MyRuntimeProvider({
     onSwitchToThread,
   });
 
+  const updateAssistantMessage = useCallback((assistantId: string, updater: (content: AnyPart[]) => void, running = true) => {
+    setMessages((previous) => previous.map((message) => {
+      if (message.id !== assistantId) return message;
+      const content: AnyPart[] = Array.isArray(message.content) ? [...message.content] as AnyPart[] : [];
+      updater(content);
+      return { ...message, content: content as unknown as ThreadMessageLike["content"], status: { type: running ? "running" : "complete" } } as ThreadMessageLike;
+    }));
+  }, []);
+
+  const fetchApproval = useCallback(async (runId: string, actionId: string, assistantMessageId?: string) => {
+    const token = getToken();
+    if (!token) return;
+    const response = await fetch(`${API_URL}/api/runs/${runId}/actions/${actionId}/approval`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok || !currentThreadIdRef.current) return;
+    const item = await response.json() as PendingApprovalResponse;
+    setApproval({ ...item, decision: item.decision ?? null, durableStatus: approvalStatusFromBackend(item.status ?? "pending_approval", item.decision ?? null), uiStatus: "idle", assistantMessageId });
+  }, [setApproval]);
+
+  const handleSseEvent = useCallback(async (
+    event: Record<string, unknown>, assistantId: string, expectedThreadId: string | null,
+  ): Promise<"waiting" | "done" | "error" | null> => {
+    if (expectedThreadId && currentThreadIdRef.current !== expectedThreadId) return null;
+    const update = (updater: (content: AnyPart[]) => void, running = true) => updateAssistantMessage(assistantId, updater, running);
+    switch (event.type) {
+      case "reasoning": update((content) => content.push({ type: "reasoning", text: String(event.text || "") })); break;
+      case "tool_call": update((content) => content.push({ type: "tool-call", toolCallId: String(event.id || ""), toolName: String(event.name || ""), args: event.arguments, status: { type: "running" } })); break;
+      case "tool_result": {
+        update((content) => {
+          const index = content.findIndex((part) => part.type === "tool-call" && part.toolCallId === event.id);
+          if (index >= 0) content[index] = { ...content[index], status: { type: "complete" }, result: event.result };
+          else content.push({ type: "tool-call", toolCallId: String(event.id || ""), toolName: String(event.name || ""), args: {}, result: event.result, status: { type: "complete" } });
+        });
+        if (typeof event.action_id === "string") {
+          setApprovals((previous) => {
+            const current = previous[event.action_id as string];
+            if (!current) return previous;
+            const updated: ApprovalState = { ...current, durableStatus: current.durableStatus === "denied" || current.durableStatus === "expired" ? current.durableStatus : "resolved", uiStatus: "idle", executionStatus: typeof event.status === "string" ? event.status : undefined };
+            const next: Record<string, ApprovalState> = { ...previous, [event.action_id as string]: updated };
+            approvalsRef.current = next;
+            return next;
+          });
+        }
+        break;
+      }
+      case "text": update((content) => { const last = content[content.length - 1]; if (last?.type === "text" && typeof last.text === "string") last.text += String(event.content || ""); else content.push({ type: "text", text: String(event.content || "") }); }); break;
+      case "usage": {
+        const tokens = typeof event.total_tokens === "number" ? (event.total_tokens >= 1000 ? `${(event.total_tokens / 1000).toFixed(1)}K` : String(event.total_tokens)) : "";
+        const time = typeof event.latency_ms === "number" ? (event.latency_ms >= 1000 ? `${(event.latency_ms / 1000).toFixed(1)}s` : `${event.latency_ms}ms`) : "";
+        const parts = [typeof event.turns === "number" && `${event.turns} turn${event.turns === 1 ? "" : "s"}`, tokens && `${tokens} tokens`, time, typeof event.cached_tokens === "number" && event.cached_tokens > 0 && `${event.cached_tokens} cached`].filter(Boolean);
+        if (parts.length) update((content) => content.push({ type: "text", text: `\n\n> ${parts.join(" · ")}` }));
+        break;
+      }
+      case "approval_required": {
+        if (typeof event.run_id === "string" && typeof event.action_id === "string") {
+          const existing = approvalsRef.current[event.action_id];
+          if (!existing) await fetchApproval(event.run_id, event.action_id, assistantId);
+        }
+        break;
+      }
+      case "waiting_for_approval": {
+        setIsRunning(false);
+        update(() => {}, false);
+        return "waiting";
+      }
+      case "error": update((content) => content.push({ type: "text", text: `\n\n*${String(event.message || "Something went wrong")}*` }), false); setIsRunning(false); return "error";
+      case "limit_reached": update((content) => content.push({ type: "text", text: "\n\n*Reached the maximum number of steps. Please continue in a new message.*" })); break;
+      case "done": update(() => {}, false); setIsRunning(false); return "done";
+    }
+    return null;
+  }, [fetchApproval, updateAssistantMessage]);
+
+  const consumeSse = useCallback(async (response: Response, assistantId: string, expectedThreadId: string | null) => {
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("No response body");
+    const decoder = new TextDecoder(); let buffer = ""; let terminal: "waiting" | "done" | "error" | null = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n"); buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try { const state = await handleSseEvent(JSON.parse(line.slice(6)) as Record<string, unknown>, assistantId, expectedThreadId); if (state) terminal = state; } catch { /* malformed event */ }
+      }
+    }
+    return terminal;
+  }, [handleSseEvent]);
+
   const onNew = useCallback(
     async (message: AppendMessage) => {
+      if (Object.values(approvalsRef.current).some((approval) => approval.durableStatus === "pending" && approval.uiStatus !== "error")) return;
       const textContent = message.content
         .filter(
           (p): p is { type: "text"; text: string } => p.type === "text"
@@ -267,14 +402,16 @@ export function MyRuntimeProvider({
           setThreadId(responseThreadId);
         }
 
-        const reader = res.body?.getReader();
+        await consumeSse(res, assistantId, responseThreadId || currentThreadIdRef.current);
+
+        const reader = { read: async () => ({ done: true, value: undefined as Uint8Array | undefined }) };
         if (!reader) throw new Error("No response body");
 
         const decoder = new TextDecoder();
         let buffer = "";
 
-        while (true) {
-          const { done, value } = await reader.read();
+        while (false) {
+          const { done, value } = await reader!.read();
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
@@ -437,8 +574,55 @@ export function MyRuntimeProvider({
         abortRef.current = null;
       }
     },
-    [messages, threadList.refresh]
+    [messages, threadList.refresh, consumeSse]
   );
+
+  const decideApproval = useCallback(async (actionId: string, decision: "approved" | "denied", reason?: string) => {
+    const approval = approvalsRef.current[actionId];
+    const activeThread = currentThreadIdRef.current;
+    if (!approval || !activeThread || approval.durableStatus !== "pending" || approval.uiStatus !== "idle" || Date.parse(approval.expires_at) <= Date.now()) {
+      if (approval && Date.parse(approval.expires_at) <= Date.now()) setApproval({ ...approval, durableStatus: "expired", uiStatus: "idle" });
+      return;
+    }
+    setApproval({ ...approval, uiStatus: "submitting_decision", error: undefined });
+    const token = getToken();
+    if (!token) return;
+    try {
+      const decisionResponse = await fetch(`${API_URL}/api/runs/${approval.run_id}/actions/${approval.action_id}/${decision === "approved" ? "approve" : "deny"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ expected_fingerprint: approval.fingerprint, ...(decision === "denied" && reason ? { reason } : {}) }),
+      });
+      if (!decisionResponse.ok) {
+        if (decisionResponse.status === 409) await refreshApprovalsForThread(activeThread);
+        throw new Error(decisionResponse.status === 404 ? "This approval is no longer available." : "The approval decision could not be accepted.");
+      }
+      const decided = { ...approval, durableStatus: decision, uiStatus: "resuming" as const, error: undefined };
+      setApproval(decided);
+      // Deliberately bodyless: the backend resumes only durable server state.
+      const resumeResponse = await fetch(`${API_URL}/api/runs/${approval.run_id}/resume`, {
+        method: "POST", headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resumeResponse.ok) {
+        if (resumeResponse.status === 409) await refreshApprovalsForThread(activeThread);
+        throw new Error(resumeResponse.status === 422 ? "This paused run is no longer valid." : "The run could not be resumed. Refresh to check its status.");
+      }
+      const assistantId = approval.assistantMessageId || [...messages].reverse().find((message) => message.role === "assistant")?.id;
+      if (!assistantId) throw new Error("The resumed message is no longer available. Refresh the thread.");
+      setIsRunning(true);
+      const terminal = await consumeSse(resumeResponse, String(assistantId), activeThread);
+      if (!terminal) {
+        setApproval({ ...decided, uiStatus: "error", error: "Connection ended before the run reported completion. Refresh to check its durable status." });
+        setIsRunning(false);
+      }
+      threadList.refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to continue this run.";
+      const current = approvalsRef.current[actionId] || approval;
+      setApproval({ ...current, uiStatus: "error", error: message });
+      setIsRunning(false);
+    }
+  }, [consumeSse, messages, refreshApprovalsForThread, setApproval, threadList]);
 
   const onCancel = useCallback(async () => {
     abortRef.current?.abort();
@@ -491,29 +675,35 @@ export function MyRuntimeProvider({
       },
     },
   });
+  const approvalValue = {
+    approvals: Object.values(approvals),
+    hasWaitingApproval: Object.values(approvals).some((approval) => approval.durableStatus === "pending" || approval.uiStatus === "submitting_decision" || approval.uiStatus === "resuming"),
+    decide: decideApproval,
+    refreshForThread: refreshApprovalsForThread,
+  };
 
   if (initialLoading) {
     return (
-      <AssistantRuntimeProvider runtime={runtime}>
-        <div className="flex h-full items-center justify-center">
-          <div className="animate-pulse text-sm text-muted-foreground">
-            Loading chat...
+      <ApprovalProvider value={approvalValue}>
+        <AssistantRuntimeProvider runtime={runtime}>
+          <div className="flex h-full items-center justify-center">
+            <div className="animate-pulse text-sm text-muted-foreground">Loading chat...</div>
           </div>
-        </div>
-      </AssistantRuntimeProvider>
+        </AssistantRuntimeProvider>
+      </ApprovalProvider>
     );
   }
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <ThreadListRefreshContext.Provider value={threadList.refresh}>
-        <BackendMessageIdContext.Provider value={backendIds}>
-          <ThreadIdContext.Provider value={threadId}>
-            {children}
-          </ThreadIdContext.Provider>
-        </BackendMessageIdContext.Provider>
-      </ThreadListRefreshContext.Provider>
-    </AssistantRuntimeProvider>
+    <ApprovalProvider value={approvalValue}>
+      <AssistantRuntimeProvider runtime={runtime}>
+        <ThreadListRefreshContext.Provider value={threadList.refresh}>
+          <BackendMessageIdContext.Provider value={backendIds}>
+            <ThreadIdContext.Provider value={threadId}>{children}</ThreadIdContext.Provider>
+          </BackendMessageIdContext.Provider>
+        </ThreadListRefreshContext.Provider>
+      </AssistantRuntimeProvider>
+    </ApprovalProvider>
   );
 }
 

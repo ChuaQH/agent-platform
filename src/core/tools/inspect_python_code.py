@@ -11,7 +11,7 @@ import ast
 import json
 from typing import Any, Literal
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 
 Focus = Literal["general", "complexity", "safety", "structure", "debugging"]
 Detail = Literal["compact", "normal", "full"]
@@ -39,6 +39,7 @@ _DANGEROUS_ATTRS = {
 
 class InspectPythonCodeTool(Tool):
     name = "inspect_python_code"
+    capabilities = frozenset({ToolCapability.COMPUTE})
     description = (
         "Analyze Python source code without executing it. "
         "Returns syntax validity, imports, functions, classes, loops, "

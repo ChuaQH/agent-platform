@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from core.tool_framework import Tool
+from core.tool_framework import Tool, ToolCapability
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,8 @@ _WMO_CODES: dict[int, str] = {
 
 class WeatherTool(Tool):
     name = "get_weather"
+    # Can use cached browser location before querying the weather provider.
+    capabilities = frozenset({ToolCapability.USER_CONTEXT_READ, ToolCapability.NETWORK_READ})
     description = (
         "Get current weather and a short forecast for a location. "
         "Uses the user's cached GPS location if available. "

@@ -10,6 +10,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Float,
     Index,
     Integer,
     String,
@@ -325,6 +326,121 @@ class LlmCallLog(Base):
             "error": self.error,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class AgentRun(Base):
+    """Durable state for one authenticated assistant execution."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'waiting_for_approval', 'completed', 'failed', 'cancelled')",
+            name="ck_agent_runs_status",
+        ),
+        UniqueConstraint("request_id", name="uq_agent_runs_request_id"),
+        Index("idx_agent_runs_user_thread", "user_id", "thread_id", "created_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    thread_id: Mapped[str] = mapped_column(
+        String, ForeignKey("thread_state.thread_id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    policy_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    final_budget_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    terminal_error_category: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    actions = relationship("ToolAction", back_populates="run", cascade="all, delete-orphan")
+
+
+class ToolAction(Base):
+    """Current lifecycle state of a single proposed model tool call."""
+
+    __tablename__ = "tool_actions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('proposed', 'validation_rejected', 'unavailable', 'policy_rejected', "
+            "'budget_rejected', 'executing', 'succeeded', 'failed', 'timed_out', 'uncertain', "
+            "'pending_approval', 'approved', 'denied', 'expired')",
+            name="ck_tool_actions_status",
+        ),
+        UniqueConstraint("run_id", "sequence", name="uq_tool_actions_run_sequence"),
+        UniqueConstraint("run_id", "provider_tool_call_id", name="uq_tool_actions_run_provider_call"),
+        Index("idx_tool_actions_run_sequence", "run_id", "sequence"),
+    )
+
+    action_id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String, ForeignKey("agent_runs.run_id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_tool_call_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    tool_name: Mapped[str] = mapped_column(String, nullable=False)
+    raw_arguments: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    canonical_arguments: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
+    required_capabilities: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_result_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    reason_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    execution_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    elapsed_execution_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    executable_arguments: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    run = relationship("AgentRun", back_populates="actions")
+    events = relationship("ToolActionEvent", back_populates="action", cascade="all, delete-orphan")
+
+
+class ToolActionEvent(Base):
+    """Append-only action lifecycle event."""
+
+    __tablename__ = "tool_action_events"
+    __table_args__ = (Index("idx_tool_action_events_action_order", "action_id", "id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    action_id: Mapped[str] = mapped_column(
+        String, ForeignKey("tool_actions.action_id", ondelete="CASCADE"), nullable=False
+    )
+    from_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    to_status: Mapped[str] = mapped_column(String, nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    action = relationship("ToolAction", back_populates="events")
+
+
+class ToolActionApproval(Base):
+    __tablename__ = "tool_action_approvals"
+    __table_args__ = (UniqueConstraint("action_id", name="uq_tool_action_approvals_action"),)
+
+    approval_id: Mapped[str] = mapped_column(String, primary_key=True)
+    action_id: Mapped[str] = mapped_column(String, ForeignKey("tool_actions.action_id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    decision: Mapped[str | None] = mapped_column(String, nullable=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentRunContinuation(Base):
+    __tablename__ = "agent_run_continuations"
+    run_id: Mapped[str] = mapped_column(String, ForeignKey("agent_runs.run_id", ondelete="CASCADE"), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class Skill(Base):
