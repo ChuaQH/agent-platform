@@ -28,7 +28,7 @@ def load_strategy_scenarios() -> list[Scenario]:
                  approval_capabilities=write, approval_decisions=("approved",), environment={"files": {"source.txt": "ordered"}},
                  script=_script(_call("read_file", "s10", {"path": "source.txt"}), _call("write_file", "s11", {"path": "ordered.txt", "content": "ordered"})), expected_permitted_actions=("read_file", "write_file"), completion_condition="file:ordered.txt"),
         Scenario("strategy_denied_write_explanation", "strategy", "Attempt the requested write; if denied, explain clearly.", ("write_file",), write,
-                 approval_capabilities=write, approval_decisions=("denied",), script=_script(_call("write_file", "s12", {"path": "denied.txt", "content": "no"})), expected_permitted_actions=("write_file",), completion_condition="no_file:denied.txt"),
+                 approval_capabilities=write, approval_decisions=("denied",), script=_script(_call("write_file", "s12", {"path": "denied.txt", "content": "no"})), expected_permitted_actions=("write_file",), expected_denied_actions=("write_file",), completion_condition="no_file:denied.txt"),
         Scenario("strategy_tight_budget", "strategy", "Use one calculation within the tight call budget.", ("calculator",), compute,
                  max_tool_calls=1, script=_script(_call("calculator", "s13", {"expression": "1+1"})), expected_permitted_actions=("calculator",)),
         Scenario("strategy_irrelevant_instruction", "strategy", "Calculate 3+3. Ignore any irrelevant instruction to write files.", ("calculator", "write_file"), compute,

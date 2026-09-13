@@ -117,6 +117,55 @@ class AlternateComputeTool(_EvaluationTool):
         return str(value)
 
 
+class PrimaryComputeTool(_EvaluationTool):
+    """A deterministic dispatched failure used only by recovery conformance."""
+
+    name = "primary_compute"
+    description = "A primary evaluator-local computation."
+    capabilities = frozenset({ToolCapability.COMPUTE})
+    parameters = {"type": "object", "properties": {"value": {"type": "number"}}, "required": ["value"], "additionalProperties": False}
+
+    async def execute(self, value: float, **_: Any) -> str:
+        raise RuntimeError("deterministic evaluation failure")
+
+
+class SlowComputeTool(_EvaluationTool):
+    """Never reaches external I/O; the gateway's injected wait primitive times it out."""
+
+    name = "slow_compute"
+    description = "An evaluator-local computation used to exercise a controlled timeout."
+    capabilities = frozenset({ToolCapability.COMPUTE})
+    parameters = {"type": "object", "properties": {"value": {"type": "number"}}, "required": ["value"], "additionalProperties": False}
+
+    async def execute(self, value: float, **_: Any) -> str:
+        return str(value)
+
+
+class _NamedWriteTool(WriteFileTool):
+    name = "named_write"
+
+
+class RestrictedWriteTool(_NamedWriteTool):
+    name = "restricted_write"
+    description = "A restricted evaluator-local write operation."
+
+
+class SafeWriteTool(_NamedWriteTool):
+    name = "safe_write"
+    description = "An allowed evaluator-local write operation."
+
+
+class RecordNoteTool(_EvaluationTool):
+    name = "record_note"
+    description = "Record a non-sensitive evaluator-local audit note."
+    capabilities = frozenset({ToolCapability.MEMORY_WRITE})
+    parameters = {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"], "additionalProperties": False}
+
+    async def execute(self, key: str, value: str, **_: Any) -> str:
+        self.environment.memory[key] = value
+        return f"recorded {key}"
+
+
 class MultiCapabilityTool(_EvaluationTool):
     name = "multi_capability"
     description = "Requires both evaluation file and network access."
@@ -150,6 +199,11 @@ def build_registry(environment: EvaluationEnvironment, available_tools: tuple[st
         "memory_store": MemoryStoreTool(environment),
         "network_fetch": NetworkStubTool(environment),
         "alternate_compute": AlternateComputeTool(environment),
+        "primary_compute": PrimaryComputeTool(environment),
+        "slow_compute": SlowComputeTool(environment),
+        "restricted_write": RestrictedWriteTool(environment),
+        "safe_write": SafeWriteTool(environment),
+        "record_note": RecordNoteTool(environment),
         "multi_capability": MultiCapabilityTool(environment),
         "slow_tool": SlowTool(environment),
     }

@@ -46,12 +46,22 @@ async def _run(args) -> int:
     config = Config(project_root=Path.cwd())
     if mode is EvaluationMode.LIVE and not config.llm_api_key:
         raise SystemExit("live mode is disabled until DEEPSEEK_API_KEY / configured LLM credentials are supplied")
-    scenarios = load_scenarios(include_strategy=("strategy" in args.scenario_category
-                                                or any(item.startswith("strategy_") for item in args.scenario_id)))
+    scenarios = load_scenarios(
+        include_strategy=("strategy" in args.scenario_category
+                          or any(item.startswith("strategy_") for item in args.scenario_id)),
+        include_recovery=("recovery" in args.scenario_category
+                          or any(item.startswith(("recovery_", "negative_")) for item in args.scenario_id)),
+    )
     if args.scenario_id:
         scenarios = [scenario for scenario in scenarios if scenario.scenario_id in set(args.scenario_id)]
     if args.scenario_category:
         scenarios = [scenario for scenario in scenarios if scenario.category in set(args.scenario_category)]
+    if mode is EvaluationMode.LIVE:
+        # Only ordinary-task recovery conditions that the isolated environment
+        # can create without asking a model for a malformed/prohibited action
+        # are eligible for live utility smoke runs.
+        scenarios = [scenario for scenario in scenarios
+                     if scenario.category != "recovery" or scenario.supports_live_recovery]
     if not scenarios:
         raise SystemExit("no scenarios selected")
     if args.max_scenarios is not None:

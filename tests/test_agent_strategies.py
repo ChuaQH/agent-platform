@@ -10,10 +10,12 @@ from typing import Any
 import pytest
 
 from assistant.agent_runner import AgentRunner, RunnerContinuation
-from assistant.execution_gateway import ExecutionContext, RegistryExecutionGateway, RunPolicy
+from assistant.execution_gateway import ExecutionContext, RegistryExecutionGateway, RunPolicy, ToolExecutionResult
 from assistant.strategy import (
     MAX_PLAN_STEPS,
     PlanBeforeReactStrategy,
+    PlanReactController,
+    PlanReactState,
     PlanReactStrategy,
     PlanValidationError,
     ReactStrategy,
@@ -341,6 +343,30 @@ def test_plan_react_invalid_replan_retains_last_plan_and_budget_suppresses_repla
     limited_strategy = PlanReactStrategy(llm=limited, tools=registry, executor=_gateway(registry, budget), max_turns=3, policy=budget)
     asyncio.run(_events(limited_strategy, _conversation()))
     assert limited_strategy.controller and limited_strategy.controller.state.replan_count == 0
+
+
+def test_plan_react_max_replan_bound_blocks_a_second_replacement_without_mutating_policy() -> None:
+    policy = RunPolicy(frozenset({ToolCapability.COMPUTE}), None, 4, None, 10.0)
+    state = PlanReactState(
+        original_goal="Bounded recovery.", current_plan=parse_plan(_plan()), revision=1, max_replans=1,
+    )
+    model = SequenceModel(LLMResponse(content=_plan(suggested_tool="calculator")))
+    controller = PlanReactController(
+        llm=model, policy=policy, tool_descriptions=[{"name": "calculator", "description": "compute"}], state=state,
+    )
+    first = asyncio.run(controller.after_tool_batch(
+        [ToolExecutionResult("execution_failure", "calculator", "failed")], {"tool_call_attempts": 1},
+    ))
+    second = asyncio.run(controller.after_tool_batch(
+        [ToolExecutionResult("timeout", "calculator", "timed out")], {"tool_call_attempts": 2},
+    ))
+
+    assert [event.type for event in first.events] == ["plan_updated"]
+    assert second.events == []
+    assert state.replan_count == state.max_replans == 1
+    assert state.revision == 2
+    assert policy.allowed_capabilities == frozenset({ToolCapability.COMPUTE})
+    assert policy.max_tool_calls == 4
 
 
 def test_plan_react_state_round_trips_in_v2_and_rejects_corruption() -> None:

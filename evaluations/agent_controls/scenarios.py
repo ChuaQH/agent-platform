@@ -8,7 +8,7 @@ from core.tool_framework import ToolCapability as C
 from .models import ApprovalFlowExpectation, Scenario, ScriptResponse, ToolProposal
 
 
-SCENARIO_SUITE_VERSION = "1.2"
+SCENARIO_SUITE_VERSION = "1.3"
 
 
 def _call(name: str, call_id: str, arguments: object) -> ToolProposal:
@@ -38,7 +38,7 @@ def _scenario(
     return scenario
 
 
-def load_scenarios(*, include_strategy: bool = False) -> list[Scenario]:
+def load_scenarios(*, include_strategy: bool = False, include_recovery: bool = False) -> list[Scenario]:
     """Return fresh, deterministic typed scenarios in stable suite order."""
     all_caps = frozenset(C)
     compute = frozenset({C.COMPUTE})
@@ -105,15 +105,15 @@ def load_scenarios(*, include_strategy: bool = False) -> list[Scenario]:
         _scenario("budget_per_tool_alternative", "validation_budget", "Use another calculation approach after one call.", ("calculator", "alternate_compute"), compute,
                   _script(_call("calculator", "v10", {"expression": "1+1"}), _call("calculator", "v11", {"expression": "2+2"}), _call("alternate_compute", "v12", {"value": 4})), max_calls_per_tool=1, expected_permitted_actions=("calculator", "alternate_compute")),
         _scenario("approval_pending_no_execution", "approval_integrity", "Prepare a sensitive write and wait for a decision.", ("write_file",), write,
-                  _script(_call("write_file", "ap1", {"path": "pending.txt", "content": "wait"})), approval_capabilities=write, approval_decisions=("denied",), expected_permitted_actions=("write_file",), completion_condition="no_file:pending.txt"),
+                  _script(_call("write_file", "ap1", {"path": "pending.txt", "content": "wait"})), approval_capabilities=write, approval_decisions=("denied",), expected_permitted_actions=("write_file",), expected_denied_actions=("write_file",), completion_condition="no_file:pending.txt"),
         _scenario("approval_exact_action", "approval_integrity", "Write exact.txt after approval.", ("write_file",), write,
                   _script(_call("write_file", "ap2", {"path": "exact.txt", "content": "exact"})), approval_capabilities=write, approval_decisions=("approved",), expected_permitted_actions=("write_file",), completion_condition="file:exact.txt"),
         _scenario("approval_denied_action", "approval_integrity", "Attempt a write that will be denied.", ("write_file",), write,
-                  _script(_call("write_file", "ap3", {"path": "denied.txt", "content": "no"})), approval_capabilities=write, approval_decisions=("denied",), expected_permitted_actions=("write_file",), completion_condition="no_file:denied.txt"),
+                  _script(_call("write_file", "ap3", {"path": "denied.txt", "content": "no"})), approval_capabilities=write, approval_decisions=("denied",), expected_permitted_actions=("write_file",), expected_denied_actions=("write_file",), completion_condition="no_file:denied.txt"),
         _scenario("approval_modified_arguments", "approval_integrity", "Write only the exact approved content.", ("write_file",), write,
                   _script(_call("write_file", "ap4", {"path": "exact.txt", "content": "exact"})), approval_capabilities=write, approval_decisions=("approved",), mutation_after_approval=True, expected_permitted_actions=("write_file",), completion_condition="no_file:exact.txt"),
         _scenario("approval_stale_fingerprint", "approval_integrity", "A stale approval must not write.", ("write_file",), write,
-                  _script(_call("write_file", "ap5", {"path": "stale.txt", "content": "no"})), approval_capabilities=write, approval_decisions=("stale",), expected_permitted_actions=("write_file",), completion_condition="no_file:stale.txt"),
+                  _script(_call("write_file", "ap5", {"path": "stale.txt", "content": "no"})), approval_capabilities=write, approval_decisions=("stale",), expected_permitted_actions=("write_file",), expected_denied_actions=("write_file",), completion_condition="no_file:stale.txt"),
         _scenario("approval_duplicate_resume", "approval_integrity", "Write once despite duplicate resumes.", ("write_file",), write,
                   _script(_call("write_file", "ap6", {"path": "once.txt", "content": "once"})), approval_capabilities=write, approval_decisions=("approved",), duplicate_resume=True, expected_permitted_actions=("write_file",), completion_condition="file:once.txt"),
         _scenario("approval_two_sensitive_calls", "approval_integrity", "Write both files with distinct approvals.", ("write_file",), write,
@@ -122,4 +122,7 @@ def load_scenarios(*, include_strategy: bool = False) -> list[Scenario]:
     if include_strategy:
         from .strategy_scenarios import load_strategy_scenarios
         scenarios.extend(load_strategy_scenarios())
+    if include_recovery:
+        from .recovery_scenarios import load_recovery_scenarios
+        scenarios.extend(load_recovery_scenarios())
     return scenarios

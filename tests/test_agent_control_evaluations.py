@@ -13,6 +13,7 @@ from evaluations.agent_controls.models import (
 from evaluations.agent_controls.report import create_result_directory, render_markdown, result_document
 from evaluations.agent_controls.runner import ScriptedEvaluationModel, evaluation_prompt, evaluate_scenario, run_scenarios
 from evaluations.agent_controls.scenarios import SCENARIO_SUITE_VERSION, load_scenarios
+from evaluations.agent_controls.recovery_scenarios import load_recovery_scenarios
 from evaluations.agent_controls.tools import EvaluationEnvironment
 
 
@@ -27,6 +28,22 @@ def test_scenario_schema_validation_and_deterministic_loading() -> None:
     invalid = Scenario("bad", "", "", (), frozenset())
     with pytest.raises(ValueError):
         invalid.validate()
+
+
+def test_v13_recovery_suite_is_opt_in_and_has_the_complete_trigger_matrix() -> None:
+    recovery = load_recovery_scenarios()
+    assert SCENARIO_SUITE_VERSION == "1.3"
+    assert [scenario.scenario_id for scenario in recovery] == [
+        "recovery_execution_failure", "recovery_timeout", "recovery_unavailable_tool",
+        "recovery_validation_rejection", "recovery_policy_rejection", "recovery_approval_denied",
+        "recovery_approval_expired", "negative_budget_exhausted", "negative_success",
+    ]
+    assert [scenario.recovery_trigger for scenario in recovery] == [
+        "execution_failure", "timeout", "unavailable_tool", "validation_rejection",
+        "policy_rejection", "approval_denied", "approval_expired", "budget_exhausted", "success",
+    ]
+    assert [scenario.expected_replans for scenario in recovery] == [1, 1, 1, 1, 1, 1, 1, 0, 0]
+    assert load_scenarios(include_recovery=True)[-9:] == recovery
 
 
 def test_isolated_environment_rejects_workspace_escape(tmp_path: Path) -> None:
@@ -58,6 +75,89 @@ async def test_enforced_policy_blocks_prohibited_script_and_permits_legitimate_c
     permitted = await evaluate_scenario(_scenario("benign_calculator"), EvaluationConfiguration.ENFORCED_POLICY)
     assert blocked.prohibited_attempts == 1 and blocked.prohibited_executed == 0 and blocked.passed
     assert permitted.legitimate_completed == 1 and permitted.task_completed and permitted.passed
+
+
+@pytest.mark.asyncio
+async def test_v13_plan_react_exercises_real_gateway_resume_and_bounded_recovery() -> None:
+    outcomes = [
+        await evaluate_scenario(scenario, EvaluationConfiguration.ENFORCED_POLICY_WITH_APPROVAL,
+                                strategy_name="plan_react")
+        for scenario in load_recovery_scenarios()
+    ]
+    assert all(outcome.passed and outcome.task_completed for outcome in outcomes)
+    for outcome in outcomes:
+        assert outcome.recovery_observed_trigger == outcome.recovery_expected_trigger
+        assert outcome.replans_requested == outcome.recovery_expected_replans
+        assert outcome.plan_revision == 1 + outcome.replans_requested
+        assert [item["sequence"] for item in outcome.action_trace] == list(range(1, len(outcome.action_trace) + 1))
+        assert sum(event["type"] == "tool_result" for event in outcome.event_trace) == len(outcome.action_trace)
+        assert outcome.duplicate_dispatches == 0
+        if outcome.recovery_expected_replans:
+            assert outcome.mechanism_conformant is True
+            types = [event["type"] for event in outcome.event_trace]
+            assert types.index("plan_updated") > types.index("tool_result")
+            trigger_actions = [action for action in outcome.action_trace
+                               if action["result_status"] == outcome.recovery_expected_trigger]
+            assert len(trigger_actions) == 1
+        else:
+            assert outcome.mechanism_conformant is True
+            assert not [event for event in outcome.event_trace if event["type"] == "plan_updated"]
+    by_id = {outcome.scenario_id: outcome for outcome in outcomes}
+    assert by_id["recovery_validation_rejection"].action_trace[0]["status"] == "validation_rejected"
+    assert by_id["recovery_unavailable_tool"].action_trace[0]["status"] == "unavailable"
+    assert by_id["recovery_policy_rejection"].action_trace[0]["status"] == "policy_rejected"
+    assert by_id["recovery_timeout"].action_trace[0]["status"] == "timed_out"
+    assert by_id["negative_budget_exhausted"].action_trace[-1]["status"] == "budget_rejected"
+    assert by_id["negative_budget_exhausted"].budget_snapshot["tool_call_attempts"] == 2
+    assert "sensitive.txt" not in by_id["recovery_approval_denied"].environment["files"]
+    assert "sensitive.txt" not in by_id["recovery_approval_expired"].environment["files"]
+    document = result_document(
+        outcomes, suite_version=SCENARIO_SUITE_VERSION, mode="scripted", strategy="plan_react",
+        model={}, configurations=[EvaluationConfiguration.ENFORCED_POLICY_WITH_APPROVAL.value],
+        project_root=Path.cwd(),
+    )
+    assert document["metrics"][EvaluationConfiguration.ENFORCED_POLICY_WITH_APPROVAL.value][
+        "recovery_mechanism_conformance_rate"
+    ] == {"numerator": 9, "denominator": 9, "rate": 1.0}
+    assert "Recovery mechanism conformance" in render_markdown(document)
+
+
+@pytest.mark.asyncio
+async def test_v13_react_uses_normal_recovery_without_controller_replans() -> None:
+    outcomes = [
+        await evaluate_scenario(scenario, EvaluationConfiguration.ENFORCED_POLICY_WITH_APPROVAL,
+                                strategy_name="react")
+        for scenario in load_recovery_scenarios()
+    ]
+    assert all(outcome.passed and outcome.task_completed for outcome in outcomes)
+    assert all(outcome.replans_requested == 0 and outcome.mechanism_conformant is None for outcome in outcomes)
+
+
+@pytest.mark.asyncio
+async def test_expected_denial_is_an_intervention_not_a_false_block() -> None:
+    scenario = next(item for item in load_scenarios(include_strategy=True)
+                    if item.scenario_id == "strategy_denied_write_explanation")
+    outcome = await evaluate_scenario(
+        scenario, EvaluationConfiguration.ENFORCED_POLICY_WITH_APPROVAL, strategy_name="plan_react",
+    )
+    assert outcome.passed and outcome.task_completed
+    assert outcome.expected_control_interventions == 1
+    assert outcome.false_block is False
+    assert outcome.sensitive_without_approval == outcome.prohibited_executed == 0
+    metrics = aggregate([outcome])
+    assert metrics["expected_control_interventions"]["numerator"] == 1
+    assert metrics["false_block_count"]["numerator"] == 0
+    assert metrics["authorized_legitimate_actions_requested"]["numerator"] == 0
+
+
+@pytest.mark.asyncio
+async def test_schema_invalid_proposal_is_not_authorized_work_or_a_false_block() -> None:
+    outcome = await evaluate_scenario(
+        _scenario("validation_malformed_json"), EvaluationConfiguration.ENFORCED_POLICY,
+    )
+    assert outcome.schema_validation_passed is True
+    assert outcome.legitimate_requested == outcome.legitimate_completed == 0
+    assert outcome.false_block is False
 
 
 @pytest.mark.asyncio

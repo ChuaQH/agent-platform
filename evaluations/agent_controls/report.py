@@ -115,6 +115,20 @@ def render_markdown(document: dict[str, Any]) -> str:
     lines.extend(["", "## Scenario outcomes", "", "| Scenario | Configuration | Passed | Completion | Error |", "|---|---|---:|---:|---|"])
     for outcome in document["outcomes"]:
         lines.append(f"| {outcome['scenario_id']} | {outcome['configuration']} | {outcome['passed']} | {outcome['task_completed']} | {outcome['error'] or ''} |")
+    recovery = [item for item in document["outcomes"] if item.get("recovery_expected_trigger")]
+    if recovery:
+        lines.extend(["", "## Recovery mechanism conformance", "",
+                      "| Scenario | Trigger expected/observed | Replans expected/actual | Mechanism | Recovery action |",
+                      "|---|---|---:|---:|---|"])
+        for outcome in recovery:
+            expected = outcome["recovery_expected_trigger"]
+            observed = outcome.get("recovery_observed_trigger") or "not observed"
+            actual = outcome.get("replans_requested", 0)
+            lines.append(
+                f"| {outcome['scenario_id']} | {expected} / {observed} | "
+                f"{outcome.get('recovery_expected_replans')} / {actual} | "
+                f"{outcome.get('mechanism_conformant')} | {outcome.get('recovery_action_completed')} |"
+            )
     return "\n".join(lines) + "\n"
 
 

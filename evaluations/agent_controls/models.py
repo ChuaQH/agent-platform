@@ -66,6 +66,11 @@ class Scenario:
     environment: dict[str, Any] = field(default_factory=dict)
     expected_permitted_actions: tuple[str, ...] = ()
     expected_prohibited_actions: tuple[str, ...] = ()
+    # An action can be intentionally denied (for example by an approval
+    # decision) without being authorized work that the task needs completed.
+    # Keep that distinction explicit so control interventions are not reported
+    # as false blocks.
+    expected_denied_actions: tuple[str, ...] = ()
     completion_condition: str = "final_text"
     max_model_turns: int = 5
     supports_scripted: bool = True
@@ -74,6 +79,12 @@ class Scenario:
     mutation_after_approval: bool = False
     duplicate_resume: bool = False
     approval_flow: ApprovalFlowExpectation | None = None
+    recovery_trigger: str | None = None
+    expected_replans: int | None = None
+    recovery_action: str | None = None
+    supports_live_recovery: bool = False
+    react_script: tuple[ScriptResponse, ...] | None = None
+    plan_react_script: tuple[ScriptResponse, ...] | None = None
 
     def validate(self) -> None:
         if not self.scenario_id or not self.category or not self.user_task:
@@ -82,6 +93,8 @@ class Scenario:
             raise ValueError(f"{self.scenario_id}: at least one available tool is required")
         if self.allowed_tools is not None and not self.allowed_tools <= set(self.available_tools):
             raise ValueError(f"{self.scenario_id}: allowlist contains an unavailable tool")
+        if not set(self.expected_denied_actions) <= set(self.available_tools):
+            raise ValueError(f"{self.scenario_id}: denied action is unavailable")
         if self.max_tool_calls < 0 or self.max_model_turns < 1 or self.max_execution_seconds < 0:
             raise ValueError(f"{self.scenario_id}: invalid execution budget")
         if any(decision not in {"approved", "denied", "stale"} for decision in self.approval_decisions):
@@ -103,6 +116,14 @@ class Scenario:
                 or not flow.path
             ):
                 raise ValueError(f"{self.scenario_id}: invalid approval-flow expectation")
+        if self.recovery_trigger is None:
+            if self.expected_replans is not None or self.recovery_action is not None:
+                raise ValueError(f"{self.scenario_id}: recovery details need a trigger")
+        elif self.recovery_trigger not in {
+            "execution_failure", "timeout", "unavailable_tool", "validation_rejection",
+            "policy_rejection", "approval_denied", "approval_expired", "budget_exhausted", "success",
+        } or self.expected_replans is None or self.expected_replans < 0:
+            raise ValueError(f"{self.scenario_id}: invalid recovery contract")
 
 
 @dataclass(frozen=True)
@@ -157,3 +178,11 @@ class ScenarioOutcome:
     approval_flow_trace: dict[str, Any] | None = None
     model_behavior_category: str | None = None
     model_behavior_summary: dict[str, str] | None = None
+    expected_control_interventions: int = 0
+    recovery_expected_trigger: str | None = None
+    recovery_observed_trigger: str | None = None
+    recovery_expected_replans: int | None = None
+    recovery_action_completed: bool | None = None
+    mechanism_conformant: bool | None = None
+    event_trace: list[dict[str, Any]] = field(default_factory=list)
+    budget_snapshot: dict[str, Any] = field(default_factory=dict)
