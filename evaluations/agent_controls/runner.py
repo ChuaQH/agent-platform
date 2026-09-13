@@ -23,6 +23,7 @@ from core.tool_framework import ToolCapability
 
 from .models import EvaluationConfiguration, EvaluationMode, Scenario, ScenarioOutcome, ScriptResponse
 from .tools import EvaluationEnvironment, build_registry
+from .observability import ObservedModel, RunObserver
 
 
 CONTROL_PROMPT = (
@@ -123,6 +124,7 @@ async def evaluate_scenario(
     *, mode: EvaluationMode = EvaluationMode.SCRIPTED,
     model: Model | None = None,
     strategy_name: str = "react",
+    observer: RunObserver | None = None,
 ) -> ScenarioOutcome:
     """Run one scenario through AgentRunner + real gateway + recorder."""
     scenario.validate()
@@ -154,6 +156,9 @@ async def evaluate_scenario(
         prefix, task = evaluation_prompt(scenario)
         conversation.set_static_prefix(prefix)
         conversation.add_user_message(task)
+        if observer is not None and mode is EvaluationMode.LIVE:
+            observer.scenario_started(scenario.scenario_id, strategy_name)
+            active_model = ObservedModel(active_model, observer, scenario.scenario_id, strategy_name)
         strategy = create_strategy(
             strategy_name, llm=active_model, tools=registry, executor=gateway,
             max_turns=scenario.max_model_turns, policy=policy,
@@ -285,7 +290,7 @@ async def evaluate_scenario(
             and set(action.required_capabilities) & required_approval_capabilities
             and action.action_id not in recorder.approvals
         )
-        return ScenarioOutcome(
+        outcome = ScenarioOutcome(
             scenario_id=scenario.scenario_id, category=scenario.category,
             configuration=configuration.value, mode=mode.value, passed=passed,
             task_completed=completed, false_block=bool(legitimate and not legitimate_completed and not scenario.expected_prohibited_actions),
@@ -313,11 +318,15 @@ async def evaluate_scenario(
             invalid_replans=planning.invalid_replans if planning else 0,
             replan_triggers=dict(planning.triggers) if planning else {},
         )
+        if observer is not None and mode is EvaluationMode.LIVE:
+            observer.scenario_done(scenario.scenario_id, passed=outcome.passed, error=outcome.error)
+        return outcome
 
 
 async def run_scenarios(
     scenarios: list[Scenario], configurations: list[EvaluationConfiguration], *,
     mode: EvaluationMode, live_config: Config | None = None, strategy_name: str = "react",
+    observer: RunObserver | None = None,
 ) -> list[ScenarioOutcome]:
     outcomes: list[ScenarioOutcome] = []
     for scenario in scenarios:
@@ -329,9 +338,9 @@ async def run_scenarios(
                     model: Model | None = LLMClient(live_config)
                 else:
                     model = None
-                outcomes.append(await evaluate_scenario(scenario, configuration, mode=mode, model=model, strategy_name=strategy_name))
+                outcomes.append(await evaluate_scenario(scenario, configuration, mode=mode, model=model, strategy_name=strategy_name, observer=observer))
             except Exception as exc:
-                outcomes.append(ScenarioOutcome(
+                outcome = ScenarioOutcome(
                     scenario_id=scenario.scenario_id, category=scenario.category,
                     configuration=configuration.value, mode=mode.value, passed=False,
                     task_completed=False, false_block=False, prohibited_attempts=0,
@@ -342,5 +351,8 @@ async def run_scenarios(
                     tool_attempts=0, approval_count=0, latency_ms=0, usage={},
                     action_trace=[], environment={}, error=_safe_error(exc),
                     strategy=strategy_name,
-                ))
+                )
+                outcomes.append(outcome)
+                if observer is not None and mode is EvaluationMode.LIVE:
+                    observer.scenario_done(scenario.scenario_id, passed=False, error=outcome.error)
     return outcomes
