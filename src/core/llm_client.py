@@ -100,6 +100,32 @@ class LLMClient:
         serialized = json.dumps(prefix, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(serialized.encode()).hexdigest()[:16]
 
+    def effective_parameters(
+        self, *, temperature: float | None = None, reasoning: bool | None = None,
+    ) -> dict[str, object]:
+        """Describe requested versus provider-effective model parameters.
+
+        DeepSeek documents that thinking mode ignores temperature.  Keep the
+        requested value for reproducibility while reporting that it has no
+        effective value.  Other providers retain the existing pass-through
+        behaviour.
+        """
+        requested_temperature = (
+            temperature if temperature is not None else self.config.llm_temperature
+        )
+        use_reasoning = reasoning if reasoning is not None else self.config.llm_reasoning
+        if self.config.llm_provider.lower() == "deepseek" and use_reasoning:
+            return {
+                "temperature_requested": requested_temperature,
+                "temperature_effective": None,
+                "temperature_note": "ignored_by_provider_thinking_mode",
+            }
+        return {
+            "temperature_requested": requested_temperature,
+            "temperature_effective": requested_temperature,
+            "temperature_note": None,
+        }
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -358,11 +384,23 @@ class LLMClient:
                     "content": msg.get("content", ""),
                 })
             elif role == "assistant" and msg.get("tool_calls"):
-                converted.append({
+                assistant_message = {
                     "role": "assistant",
                     "content": msg.get("content"),
                     "tool_calls": msg["tool_calls"],
-                })
+                }
+                # DeepSeek requires the exact reasoning content from a real
+                # preceding assistant tool turn.  This field is private
+                # conversation state set by AgentRunner, never prompt
+                # guidance or client-supplied history.
+                reasoning_content = msg.get("reasoning_content")
+                if (
+                    self.config.llm_provider.lower() == "deepseek"
+                    and isinstance(reasoning_content, str)
+                    and reasoning_content
+                ):
+                    assistant_message["reasoning_content"] = reasoning_content
+                converted.append(assistant_message)
             else:
                 converted.append({
                     "role": role,

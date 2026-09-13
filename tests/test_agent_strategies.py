@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from typing import Any
 
 import pytest
@@ -246,6 +247,29 @@ def test_plan_react_replans_once_and_replaces_transient_guidance() -> None:
     final_messages = model.calls[-1][0]
     guidance = [message["content"] for message in final_messages if "untrusted_plan_guidance" in message.get("content", "")]
     assert len(guidance) == 1 and "Replacement goal." in guidance[0] and "Complete the task." not in guidance[0]
+    assert all(message["role"] == "user" for message in final_messages if "untrusted_plan_guidance" in message.get("content", ""))
+
+
+def test_plan_guidance_is_transient_user_context_not_assistant_history() -> None:
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+    policy = RunPolicy(frozenset({ToolCapability.COMPUTE}), None, 1, None, 10.0)
+    planner_reasoning = "planner-private-reasoning"
+    model = SequenceModel(
+        LLMResponse(content=_plan(), reasoning_content=planner_reasoning),
+        LLMResponse(content="Done"),
+    )
+    conversation = _conversation()
+    strategy = PlanReactStrategy(llm=model, tools=registry, executor=_gateway(registry, policy), max_turns=2, policy=policy)
+
+    asyncio.run(_events(strategy, conversation))
+
+    executor_messages = model.calls[1][0]
+    guidance = [message for message in executor_messages if "untrusted_plan_guidance" in message.get("content", "")]
+    assert len(guidance) == 1 and guidance[0]["role"] == "user"
+    assert "reasoning_content" not in guidance[0]
+    assert not [message for message in conversation.messages if "untrusted_plan_guidance" in message.get("content", "")]
+    assert not [message for message in conversation.messages if message.get("reasoning_content") == planner_reasoning]
 
 
 def test_plan_react_invalid_replan_retains_last_plan_and_budget_suppresses_replan() -> None:
@@ -288,6 +312,64 @@ def test_plan_react_state_round_trips_in_v2_and_rejects_corruption() -> None:
     persisted["strategy_state"] = {**state, "strategy_name": "unsafe.import.path"}
     with pytest.raises(ValueError):
         RunnerContinuation.from_persisted(persisted)
+
+
+def test_approval_continuation_keeps_genuine_tool_turn_reasoning_private() -> None:
+    write = RecordingWriteTool()
+    registry = ToolRegistry(); registry.register(write)
+    write_capability = frozenset({ToolCapability.WORKSPACE_WRITE})
+    policy = RunPolicy(write_capability, None, 1, None, 10.0, write_capability)
+    model = SequenceModel(
+        LLMResponse(content=_plan()),
+        LLMResponse(
+            reasoning_content="genuine-tool-turn-reasoning",
+            tool_calls=[_tool_call("write", {"value": "approved"})],
+        ),
+    )
+    strategy = PlanReactStrategy(llm=model, tools=registry, executor=_gateway(registry, policy), max_turns=3, policy=policy)
+
+    asyncio.run(_events(strategy, _conversation()))
+
+    assert strategy.continuation is not None
+    persisted = asdict(strategy.continuation)
+    # The no-recorder unit gateway has no durable action id; production
+    # gateways supply one before a continuation can be persisted.
+    persisted["pending_action_id"] = "durable-action"
+    restored = RunnerContinuation.from_persisted(persisted)
+    tool_turn = next(message for message in restored.conversation_messages if message.get("tool_calls"))
+    assert tool_turn["reasoning_content"] == "genuine-tool-turn-reasoning"
+    assert not [message for message in restored.conversation_messages if "untrusted_plan_guidance" in message.get("content", "")]
+
+
+def test_plan_react_approval_resume_restores_plan_and_genuine_reasoning_metadata() -> None:
+    scenario = next(item for item in load_scenarios() if item.scenario_id == "benign_workspace_write_approval")
+    model = SequenceModel(
+        LLMResponse(content=_plan()),
+        LLMResponse(
+            reasoning_content="resume-private-reasoning",
+            tool_calls=[_tool_call("write_file", {"path": "allowed.txt", "content": "approved"})],
+        ),
+        LLMResponse(content="Write completed."),
+    )
+
+    outcome = asyncio.run(evaluate_scenario(
+        scenario, EvaluationConfiguration.ENFORCED_POLICY_WITH_APPROVAL,
+        model=model, strategy_name="plan_react",
+    ))
+
+    resumed_messages = model.calls[-1][0]
+    tool_turn = next(message for message in resumed_messages if message.get("tool_calls"))
+    guidance = next(message for message in resumed_messages if "untrusted_plan_guidance" in message.get("content", ""))
+    assert outcome.task_completed and outcome.passed
+    assert tool_turn["reasoning_content"] == "resume-private-reasoning"
+    assert guidance["role"] == "user"
+
+
+def test_plan_guidance_directs_sensitive_actions_to_gateway_approval_flow() -> None:
+    guidance = parse_plan(_plan()).to_guidance()
+    assert "submit its exact tool call" in guidance
+    assert "allow the gateway to pause" in guidance
+    assert "ordinary chat response" in guidance
 
 
 @pytest.mark.asyncio

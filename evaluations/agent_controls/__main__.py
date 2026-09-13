@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from core.config import Config
+from core.llm_client import LLMClient
 
 from .models import EvaluationConfiguration, EvaluationMode
 from .report import create_result_directory, git_metadata, result_document, write_reports
@@ -60,6 +61,7 @@ async def _run(args) -> int:
         raise SystemExit("--repeats must be at least 1")
     destination = create_result_directory(args.output, label=args.label, overwrite=args.overwrite)
     expected_runs = len(scenarios) * len(configs) * args.repeats
+    parameter_metadata = LLMClient(config).effective_parameters()
     manifest = {
         "evaluation_run_id": uuid.uuid4().hex, "evaluation_schema_version": "1.1",
         "scenario_suite_version": SCENARIO_SUITE_VERSION, "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
@@ -67,6 +69,9 @@ async def _run(args) -> int:
         "provider": config.llm_provider if mode is EvaluationMode.LIVE else "scripted",
         "model": config.llm_model if mode is EvaluationMode.LIVE else "deterministic",
         "temperature": config.llm_temperature if mode is EvaluationMode.LIVE else 0.0,
+        **(parameter_metadata if mode is EvaluationMode.LIVE else {
+            "temperature_requested": 0.0, "temperature_effective": 0.0, "temperature_note": None,
+        }),
         "strategies_requested": [args.strategy], "configurations_requested": [item.value for item in configs],
         "repeat_count": args.repeats, "selected_scenario_ids": [item.scenario_id for item in scenarios],
         "expected_max_scenario_runs": expected_runs, "configured_max_live_model_calls": args.max_live_model_calls,
@@ -94,6 +99,8 @@ async def _run(args) -> int:
                 batch = await run_scenarios(scenarios, configs, mode=mode,
                     live_config=config if mode is EvaluationMode.LIVE else None, strategy_name=args.strategy, observer=observer)
                 outcomes.extend(batch)
+                if observer.circuit_open:
+                    break
                 if args.fail_fast and any(item.error for item in batch):
                     raise RuntimeError("fail_fast_scenario_failure")
             observer.event("report_generation_started")
@@ -103,7 +110,7 @@ async def _run(args) -> int:
         observer.fail(exc)
     document = result_document(
         outcomes, suite_version=SCENARIO_SUITE_VERSION, mode=mode.value, strategy=args.strategy,
-        model={"provider": config.llm_provider if mode is EvaluationMode.LIVE else "scripted", "model": config.llm_model if mode is EvaluationMode.LIVE else "deterministic", "temperature": config.llm_temperature if mode is EvaluationMode.LIVE else 0.0, "repeats": args.repeats},
+        model={"provider": config.llm_provider if mode is EvaluationMode.LIVE else "scripted", "model": config.llm_model if mode is EvaluationMode.LIVE else "deterministic", "temperature": config.llm_temperature if mode is EvaluationMode.LIVE else 0.0, "repeats": args.repeats, **(parameter_metadata if mode is EvaluationMode.LIVE else {"temperature_requested": 0.0, "temperature_effective": 0.0, "temperature_note": None})},
         configurations=[item.value for item in configs], project_root=Path.cwd(),
     )
     json_path, markdown_path = write_reports(destination, document)

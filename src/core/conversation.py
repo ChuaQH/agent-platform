@@ -58,13 +58,21 @@ class Conversation:
         self,
         content: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
+        reasoning_content: str | None = None,
     ) -> None:
-        """Append an assistant message (with optional tool calls)."""
+        """Append a genuine assistant message (with optional tool calls).
+
+        ``reasoning_content`` is private provider protocol state.  It is set
+        only from an actual model response and is consumed by the provider
+        adapter on a later tool request; transports must never serialize it.
+        """
         msg: dict[str, Any] = {"role": "assistant"}
         if content:
             msg["content"] = content
         if tool_calls:
             msg["tool_calls"] = tool_calls
+        if reasoning_content:
+            msg["reasoning_content"] = reasoning_content
         self.messages.append(msg)
 
     def add_tool_result(

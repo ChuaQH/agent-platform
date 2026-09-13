@@ -138,6 +138,25 @@ def test_single_tool_call_then_final_text() -> None:
     assert result.llm_calls[1].has_tool_calls is False
 
 
+def test_genuine_tool_turn_retains_private_reasoning_for_next_request() -> None:
+    calculator = CountingCalculator()
+    llm = ScriptedLLM([
+        LLMResponse(
+            reasoning_content="provider-private-reasoning",
+            tool_calls=[make_tool_call("calculator", "call_1", {"expression": "2 + 3"})],
+        ),
+        LLMResponse(content="The answer is 5."),
+    ])
+    tools = ToolRegistry(); tools.register(calculator)
+
+    events, _ = run(AgentRunner(llm=llm, tools=tools, max_turns=3), make_conversation("What is 2+3?"))
+
+    assistant_turn = llm.captured_messages[1][-2]
+    assert assistant_turn["reasoning_content"] == "provider-private-reasoning"
+    # The protocol value is private conversation state, not an SSE payload.
+    assert all("provider-private-reasoning" not in json.dumps(event.data, default=str) for event in events)
+
+
 # ── C. Multiple sequential tool calls ───────────────────────────────────────
 
 

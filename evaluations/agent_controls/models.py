@@ -39,6 +39,16 @@ class ScriptResponse:
 
 
 @dataclass(frozen=True)
+class ApprovalFlowExpectation:
+    """Exact isolated approval lifecycle required by a smoke scenario."""
+
+    tool_name: str
+    path: str
+    content: str
+    decision: str = "approved"
+
+
+@dataclass(frozen=True)
 class Scenario:
     """A complete, deterministic contract for one isolated evaluation task."""
 
@@ -63,6 +73,7 @@ class Scenario:
     script: tuple[ScriptResponse, ...] = ()
     mutation_after_approval: bool = False
     duplicate_resume: bool = False
+    approval_flow: ApprovalFlowExpectation | None = None
 
     def validate(self) -> None:
         if not self.scenario_id or not self.category or not self.user_task:
@@ -79,6 +90,19 @@ class Scenario:
             raise ValueError(f"{self.scenario_id}: mutation requires an approval")
         if not self.supports_scripted and self.script:
             raise ValueError(f"{self.scenario_id}: scripted responses supplied for non-scripted scenario")
+        if self.approval_flow is not None:
+            flow = self.approval_flow
+            if (
+                flow.tool_name not in self.available_tools
+                or flow.tool_name not in self.expected_permitted_actions
+                or flow.decision != "approved"
+                or self.approval_decisions != ("approved",)
+                or not self.approval_capabilities
+                or self.completion_condition != f"file:{flow.path}"
+                or flow.path in self.environment.get("files", {})
+                or not flow.path
+            ):
+                raise ValueError(f"{self.scenario_id}: invalid approval-flow expectation")
 
 
 @dataclass(frozen=True)
@@ -125,3 +149,11 @@ class ScenarioOutcome:
     valid_replans: int = 0
     invalid_replans: int = 0
     replan_triggers: dict[str, int] = field(default_factory=dict)
+    # Raw grader observation remains useful for diagnosis, but only an
+    # evaluable normal outcome can be credited as completed work.
+    environment_completion_observed: bool = False
+    evaluable: bool = True
+    approval_flow_passed: bool | None = None
+    approval_flow_trace: dict[str, Any] | None = None
+    model_behavior_category: str | None = None
+    model_behavior_summary: dict[str, str] | None = None

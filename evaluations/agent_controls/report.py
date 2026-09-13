@@ -14,7 +14,7 @@ from .metrics import aggregate
 from .models import ScenarioOutcome
 
 
-EVALUATION_SCHEMA_VERSION = "1.0"
+EVALUATION_SCHEMA_VERSION = "1.1"
 
 
 def git_metadata(project_root: Path) -> dict[str, Any]:

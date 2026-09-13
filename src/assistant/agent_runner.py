@@ -83,7 +83,7 @@ class AgentEvent:
 class ControllerUpdate:
     """Safe runner-controller output; controllers never dispatch tools."""
 
-    guidance: str | None = None
+    strategy_guidance: str | None = None
     events: list[AgentEvent] = field(default_factory=list)
 
 
@@ -223,6 +223,7 @@ class AgentRunner:
         tool_timeout: float | None = None,
         executor: ToolCallExecutor | None = None,
         controller: RunnerController | None = None,
+        strategy_guidance: str | None = None,
     ) -> None:
         self._llm = llm
         self._tools = tools
@@ -243,6 +244,10 @@ class AgentRunner:
             tool_timeout=tool_timeout,
         )
         self._controller = controller
+        # Application-generated, request-local context.  It is deliberately
+        # not a Conversation message and has no execution authority; the
+        # gateway remains the security boundary.
+        self._strategy_guidance = strategy_guidance
         self.result: AgentResult | None = None
         self.continuation: RunnerContinuation | None = None
         self._usage_totals: dict[str, int] = {
@@ -318,10 +323,13 @@ class AgentRunner:
             turn_start = time.monotonic()
             try:
                 model_messages = conversation.get_messages_for_api()
-                if controller_update.guidance:
-                    # Guidance is ephemeral model context, deliberately not
-                    # appended to durable conversation history.
-                    model_messages.append({"role": "assistant", "content": controller_update.guidance})
+                strategy_guidance = controller_update.strategy_guidance or self._strategy_guidance
+                if strategy_guidance:
+                    # DeepSeek treats assistant turns as provider responses in
+                    # thinking mode.  Strategy context is application data,
+                    # not such a turn, so use a provider-supported ephemeral
+                    # user-context message without mutating Conversation.
+                    model_messages.append({"role": "user", "content": strategy_guidance})
                 response = await self._llm.chat(
                     messages=model_messages,
                     tools=self._tools.to_openai_schemas(),
@@ -367,15 +375,16 @@ class AgentRunner:
                 bool(response.tool_calls),
             )
 
-            if response.reasoning_content and response.reasoning_content.strip():
-                yield AgentEvent("reasoning", {
-                    "text": response.reasoning_content.strip(),
-                    "turn": turn_number,
-                })
+            # ``reasoning_content`` is provider protocol state in DeepSeek
+            # thinking mode.  Retain it only on the genuine assistant turn
+            # below; do not expose it through SSE or other public events.
 
             if response.content and not response.tool_calls:
                 final_text = response.content.strip()
-                conversation.add_assistant_message(content=response.content)
+                conversation.add_assistant_message(
+                    content=response.content,
+                    reasoning_content=response.reasoning_content,
+                )
                 yield AgentEvent("text", {"content": final_text})
                 break
 
@@ -390,6 +399,7 @@ class AgentRunner:
                 conversation.add_assistant_message(
                     content=response.content,
                     tool_calls=response.tool_calls,
+                    reasoning_content=response.reasoning_content,
                 )
 
                 batch_results: list[ToolExecutionResult] = []

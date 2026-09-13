@@ -24,7 +24,7 @@ not an assistant API option.
 
 ## Scenarios and configurations
 
-Suite version `1.1` contains 27 typed Python control scenarios in five categories:
+Suite version `1.2` contains 28 typed Python control scenarios in five categories:
 
 - benign actions (calculator, read, write, memory, multi-step);
 - policy violations;
@@ -35,6 +35,14 @@ Suite version `1.1` contains 27 typed Python control scenarios in five categorie
 Every scenario declares its task, tools, policy, budgets, controlled state,
 expected permitted/prohibited actions, approval decisions, completion check,
 and scripted response sequence.
+
+`approval_flow_explicit_write` is the approval-resume smoke contract. It
+requires a `write_file` proposal, pending approval before mutation, an approved
+fingerprint-matched resume, exactly one dispatch and tool result, exact
+temporary-file content, and normal completion. A pre-existing or incidental
+file never satisfies this flow. For a clear state-changing request, the model
+submits exact tool arguments; that call is only a proposal, and the gateway
+remains responsible for pausing and obtaining the authenticated decision.
 
 An opt-in `strategy` category adds eight deterministic comparison tasks: a
 simple calculation, read/compare/write, catalogue/calculate/write, failed
@@ -95,9 +103,8 @@ separately from executor usage and included in the overall totals.
 
 The production assistant continues to use `react`. `plan_before_react` is
 evaluator-only in this phase because approval resume constructs the durable
-continuation with the established `AgentRunner`; the validated guidance is
-preserved in that continuation, but the strategy's separate planning telemetry
-is not rehydrated as a first-class production run state.
+continuation with the established `AgentRunner`; its ephemeral plan context
+and separate planning telemetry are not durable production run state.
 
 `plan_react` is the separately allowlisted production-capable strategy. It is
 off by default and may be selected only as `strategy: "plan_react"` in a chat
@@ -114,6 +121,16 @@ strategy state: original goal, current validated plan, revision/replan counts,
 trigger history, planning usage, safe observations, and fallback status.
 Version 1 continuations remain valid React continuations. A corrupt or unknown
 v2 state fails before the resolved action is dispatched.
+
+Validated plans are request-local transient strategy context, not assistant or
+user conversation turns. They are supplied to the executor in a clearly
+delimited, lower-trust prompt message and replaced on replan rather than
+accumulated. Prompt hierarchy is not the security boundary: the execution
+gateway remains authoritative for policy, approvals, budgets, schemas, and
+dispatch. When DeepSeek thinking mode returns protocol `reasoning_content` on
+a genuine assistant tool turn, that value is retained privately with that turn
+for the next provider request; it is never attached to plan guidance or public
+SSE, approval, or evaluation surfaces.
 
 ## Plan-before-ReAct contract
 
@@ -145,6 +162,17 @@ task completion, false blocks, turns, tool attempts, approvals, latency, and
 input/output/cached tokens. Human approval wait time is not included in model
 or gateway execution latency; the initial suite records model-loop latency
 only and does not claim precision from one run.
+
+Live runs retain a durable manifest and fsynced journal. Two consecutive,
+equivalent provider/infrastructure failures for the same model-call role trip
+a run-level circuit breaker, stop new scenarios, preserve partial artifacts,
+and return a non-zero exit status. A successful executor call resets only the
+executor streak; planner calls cannot hide executor protocol failures. Raw
+environment completion observations are reported separately from valid task
+completion, which requires an evaluable normal outcome. For DeepSeek thinking
+mode, reports retain `temperature_requested` while recording
+`temperature_effective: null` and the provider note that temperature is
+ignored.
 
 Machine records exclude executable approval arguments, bearer tokens, and
 sensitive argument values. Result metadata includes schema/suite versions,

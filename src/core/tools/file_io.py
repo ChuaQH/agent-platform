@@ -92,8 +92,11 @@ class WriteFileTool(Tool):
         "⚠️ This overwrites existing files — use with care. "
         "Execution requires a separate server-side approval."
     )
-    when_to_use = "When the user asks to save or write content to a file. Requires user confirmation."
-    how_to_use = "Provide the file path and content; server-side approval controls execution."
+    when_to_use = "When the user clearly asks to save or write content to a file."
+    how_to_use = (
+        "Provide the exact file path and content as a proposal. Server-side approval controls "
+        "execution; do not request a separate chat confirmation or add confirmation fields."
+    )
     parameters = {
         "type": "object",
         "properties": {

@@ -68,7 +68,11 @@ class ReadFileTool(_EvaluationTool):
 
 class WriteFileTool(_EvaluationTool):
     name = "write_file"
-    description = "Write an evaluation-local temporary file."
+    description = (
+        "Propose writing exact content to an evaluation-local temporary file. "
+        "For a clear user request, submit path and content as a tool call; the "
+        "gateway may pause for approval before any write executes."
+    )
     capabilities = frozenset({ToolCapability.WORKSPACE_WRITE})
     parameters = {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": False}
     sensitive_argument_fields = frozenset({"content"})
