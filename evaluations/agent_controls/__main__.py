@@ -12,7 +12,7 @@ from core.config import Config
 from core.llm_client import LLMClient
 
 from .models import EvaluationConfiguration, EvaluationMode
-from .report import create_result_directory, git_metadata, result_document, write_reports
+from .report import create_result_directory, git_metadata, result_document, validate_artifact_invocation, write_reports
 from .runner import run_scenarios
 from .scenarios import SCENARIO_SUITE_VERSION, load_scenarios
 from .observability import RunObserver
@@ -35,6 +35,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-scenarios", type=int, default=None)
     run.add_argument("--max-live-model-calls", type=int, default=64)
     run.add_argument("--model-call-timeout", type=float, default=60.0)
+    run.add_argument("--provider-retries", type=int, choices=(0, 1), default=0,
+                     help="retry each transient live provider transport failure at most once (default: 0)")
     run.add_argument("--fail-fast", action="store_true")
     return parser
 
@@ -59,11 +61,20 @@ async def _run(args) -> int:
     configs = list(EvaluationConfiguration) if args.configuration == "all" else [EvaluationConfiguration(args.configuration)]
     if args.repeats < 1:
         raise SystemExit("--repeats must be at least 1")
-    destination = create_result_directory(args.output, label=args.label, overwrite=args.overwrite)
+    # Dry-runs validate construction only. They must never occupy the label
+    # selected for a later live invocation or append to its journal.
+    dry_label = None
+    if args.dry_run:
+        dry_label = f"{args.label or 'evaluation'}-dry-run-{uuid.uuid4().hex[:8]}"
+    destination = create_result_directory(
+        args.output, label=dry_label or args.label,
+        overwrite=args.overwrite if not args.dry_run else False,
+    )
     expected_runs = len(scenarios) * len(configs) * args.repeats
     parameter_metadata = LLMClient(config).effective_parameters()
     manifest = {
-        "evaluation_run_id": uuid.uuid4().hex, "evaluation_schema_version": "1.1",
+        "evaluation_run_id": uuid.uuid4().hex, "invocation_id": uuid.uuid4().hex,
+        "evaluation_schema_version": "1.1",
         "scenario_suite_version": SCENARIO_SUITE_VERSION, "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         "git": git_metadata(Path.cwd()), "mode": mode.value,
         "provider": config.llm_provider if mode is EvaluationMode.LIVE else "scripted",
@@ -75,10 +86,13 @@ async def _run(args) -> int:
         "strategies_requested": [args.strategy], "configurations_requested": [item.value for item in configs],
         "repeat_count": args.repeats, "selected_scenario_ids": [item.scenario_id for item in scenarios],
         "expected_max_scenario_runs": expected_runs, "configured_max_live_model_calls": args.max_live_model_calls,
+        "configured_max_provider_attempts": args.max_live_model_calls,
+        "configured_provider_retries": args.provider_retries,
         "model_call_timeout_seconds": args.model_call_timeout, "lifecycle_status": "initializing",
         "last_completed_checkpoint": "directory_created",
     }
-    observer = RunObserver(destination, manifest, max_calls=args.max_live_model_calls, timeout=args.model_call_timeout)
+    observer = RunObserver(destination, manifest, max_calls=args.max_live_model_calls,
+                           timeout=args.model_call_timeout, provider_retries=args.provider_retries)
     observer.update(status="ready", checkpoint="selection_validated")
     outcomes = []
     try:
@@ -113,6 +127,7 @@ async def _run(args) -> int:
         model={"provider": config.llm_provider if mode is EvaluationMode.LIVE else "scripted", "model": config.llm_model if mode is EvaluationMode.LIVE else "deterministic", "temperature": config.llm_temperature if mode is EvaluationMode.LIVE else 0.0, "repeats": args.repeats, **(parameter_metadata if mode is EvaluationMode.LIVE else {"temperature_requested": 0.0, "temperature_effective": 0.0, "temperature_note": None})},
         configurations=[item.value for item in configs], project_root=Path.cwd(),
     )
+    validate_artifact_invocation(destination, observer.manifest)
     json_path, markdown_path = write_reports(destination, document)
     observer.event("report_generation_completed", json_path=str(json_path.name), markdown_path=str(markdown_path.name))
     failed = observer.manifest["lifecycle_status"] in {"failed", "interrupted"}

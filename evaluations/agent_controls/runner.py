@@ -9,7 +9,7 @@ import uuid
 from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from assistant.agent_runner import AgentEvent, AgentRunner
 from assistant.execution_gateway import ExecutionContext, RegistryExecutionGateway, RunPolicy
@@ -444,16 +444,19 @@ async def evaluate_scenario(
 async def run_scenarios(
     scenarios: list[Scenario], configurations: list[EvaluationConfiguration], *,
     mode: EvaluationMode, live_config: Config | None = None, strategy_name: str = "react",
-    observer: RunObserver | None = None,
+    observer: RunObserver | None = None, model_factory: Callable[[], Model] | None = None,
 ) -> list[ScenarioOutcome]:
     outcomes: list[ScenarioOutcome] = []
     for scenario in scenarios:
         for configuration in configurations:
             try:
                 if mode is EvaluationMode.LIVE:
-                    if live_config is None or not live_config.llm_api_key:
+                    if model_factory is not None:
+                        model = model_factory()
+                    elif live_config is None or not live_config.llm_api_key:
                         raise RuntimeError("live mode requires configured model credentials")
-                    model: Model | None = LLMClient(live_config)
+                    else:
+                        model = LLMClient(live_config)
                 else:
                     model = None
                 outcomes.append(await evaluate_scenario(scenario, configuration, mode=mode, model=model, strategy_name=strategy_name, observer=observer))

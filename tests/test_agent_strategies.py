@@ -33,13 +33,29 @@ from evaluations.agent_controls.strategy_scenarios import load_strategy_scenario
 class SequenceModel:
     """Local deterministic model that records whether planner tools were offered."""
 
-    def __init__(self, *responses: LLMResponse) -> None:
+    def __init__(self, *responses: LLMResponse | BaseException) -> None:
         self.responses = list(responses)
         self.calls: list[tuple[list[dict[str, Any]], object]] = []
 
     async def chat(self, messages, tools=None, **kwargs) -> LLMResponse:
         self.calls.append((list(messages), tools))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+class APIConnectionError(Exception):
+    """Named provider transport fake; strategy code must not handle it as a plan error."""
+
+
+class ProviderFailureModel:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[dict[str, Any]], object]] = []
+
+    async def chat(self, messages, tools=None, **kwargs) -> LLMResponse:
+        self.calls.append((list(messages), tools))
+        raise APIConnectionError("transport unavailable")
 
 
 class RecordingWriteTool(Tool):
@@ -164,6 +180,41 @@ def test_invalid_plan_has_one_repair_then_recorded_react_fallback() -> None:
     assert strategy.planning.validation_failures == 2
     assert strategy.planning.repair_attempts == strategy.planning.fallbacks == 1
     assert strategy.result and strategy.result.final_text == "Fallback answer"
+
+
+def test_provider_plan_failure_does_not_repair_or_fall_back_to_react() -> None:
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+    policy = RunPolicy(frozenset({ToolCapability.COMPUTE}), None, 1, None, 10.0)
+    model = ProviderFailureModel()
+    strategy = PlanReactStrategy(llm=model, tools=registry, executor=_gateway(registry, policy), max_turns=2, policy=policy)
+
+    with pytest.raises(APIConnectionError):
+        asyncio.run(_events(strategy, _conversation()))
+
+    assert len(model.calls) == 1 and model.calls[0][1] is None
+    assert strategy.planning.validation_failures == 0
+    assert strategy.planning.repair_attempts == strategy.planning.fallbacks == 0
+
+
+def test_provider_replan_failure_does_not_repair_or_start_another_executor_turn() -> None:
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+    policy = RunPolicy(frozenset({ToolCapability.COMPUTE}), None, 3, None, 10.0)
+    model = SequenceModel(
+        LLMResponse(content=_plan()),
+        LLMResponse(tool_calls=[_tool_call("missing", {})]),
+        APIConnectionError("transport unavailable"),
+    )
+    strategy = PlanReactStrategy(llm=model, tools=registry, executor=_gateway(registry, policy), max_turns=3, policy=policy)
+
+    with pytest.raises(APIConnectionError):
+        asyncio.run(_events(strategy, _conversation()))
+
+    assert len(model.calls) == 3
+    assert [tools for _, tools in model.calls] == [None, registry.to_openai_schemas(), None]
+    assert strategy.planning.validation_failures == 0
+    assert strategy.planning.repair_attempts == 0
 
 
 def test_plan_cannot_widen_policy_or_bypass_gateway() -> None:

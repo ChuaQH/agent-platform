@@ -87,11 +87,32 @@ available. It records provider/model, temperature, timestamps, turn/token and
 latency data, and continues after an individual scenario error. Start with at
 least five repeats; do not infer performance differences from a single run.
 
+Run a live evaluation in the foreground with network access enabled. Configure
+the command-execution timeout to exceed the whole expected evaluation (not only
+the per-call timeout), and if an execution tool yields a reusable session, poll
+that session rather than launching a hidden/background replacement process.
+
 ```powershell
 python -m evaluations.agent_controls run --mode live --strategy react `
   --configuration enforced_policy --repeats 5 `
   --scenario-category prompt_injection --output evaluation-results/
 ```
+
+`--provider-retries` defaults to `0` and accepts only `0` or `1`. It retries
+only a transient transport/connection or timeout failure before any usable
+provider response arrives; authentication, HTTP request/protocol, policy,
+schema, grading, and tool failures are never retried. The global
+`--max-live-model-calls` value is a cap on provider transport attempts,
+including retries. A failed attempt is recorded as possibly billable because a
+connection error can occur after the request left the evaluator; the suite does
+not claim a zero provider cost without provider evidence.
+
+A dry-run always writes to a separate `*-dry-run-<id>` directory and never
+occupies a requested live label. `--overwrite` archives an existing exact
+evaluation-result directory under `.archive/` and creates a fresh invocation,
+manifest, and journal; it never appends lifecycle records. Every manifest and
+journal event carries the same invocation ID, and report validation rejects a
+mixed journal.
 
 `plan_before_react` makes one separate, tool-free planning call before the
 normal ReAct executor loop. Its planner call has a separate limit of two
@@ -153,6 +174,12 @@ in the overall record.
 No cost is reported: pricing configuration and a calculation date are not
 part of this suite.
 
+Plan repair and React fallback apply only when the provider returned a plan
+that failed the strict plan schema. A provider failure before a usable response
+is an evaluator/provider failure: it consumes no repair allowance, does not
+emit `plan_invalid`, does not fall back to React, and is handled by the live
+transport observer. The same rule applies to replanning.
+
 ## Metrics
 
 Every rate stores and renders `numerator/denominator`, including prohibited
@@ -164,10 +191,15 @@ or gateway execution latency; the initial suite records model-loop latency
 only and does not claim precision from one run.
 
 Live runs retain a durable manifest and fsynced journal. Two consecutive,
-equivalent provider/infrastructure failures for the same model-call role trip
-a run-level circuit breaker, stop new scenarios, preserve partial artifacts,
-and return a non-zero exit status. A successful executor call resets only the
-executor streak; planner calls cannot hide executor protocol failures. Raw
+equivalent failed logical provider calls for the same model-call role trip a
+run-level circuit breaker after their configured transport retries are
+exhausted. The typed abort stops the current scenario before a fallback or
+executor call can start, prevents later scenarios, preserves partial artifacts,
+and returns a non-zero exit status. Logical calls, started transport attempts,
+completed provider responses, retries, exhausted transport failures, and
+possibly-billable unobserved attempts are tracked separately. A successful
+executor call resets only the executor streak; planner calls cannot hide
+executor protocol failures. Raw
 environment completion observations are reported separately from valid task
 completion, which requires an evaluable normal outcome. For DeepSeek thinking
 mode, reports retain `temperature_requested` while recording

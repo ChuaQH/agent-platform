@@ -259,9 +259,10 @@ class PlanBeforeReactStrategy:
                 self.planning.plan_valid = True
                 self.planning.step_count = len(plan.steps)
                 break
-            except Exception:
-                # Provider failures use the same safe fallback; no exception
-                # detail is sent into the executor context or event payload.
+            except PlanValidationError:
+                # Only a response that was actually returned and failed the
+                # strict plan contract gets a repair/fallback path. Provider
+                # failures must reach the evaluator/transport observer.
                 self.planning.validation_failures += 1
                 if attempt == 0:
                     self.planning.repair_attempts = 1
@@ -492,7 +493,7 @@ class PlanReactController:
                     "revision": self.state.revision, "trigger_reason": reason,
                     "plan": _plan_payload(replacement), "planning": self.state.planning.usage(),
                 })])
-            except Exception:
+            except PlanValidationError:
                 self.state.planning.validation_failures += 1
                 if attempt == 0:
                     self.state.planning.repair_attempts += 1
@@ -539,7 +540,7 @@ class PlanReactStrategy:
                 state.planning.plan_valid, state.planning.step_count = True, len(plan.steps)
                 yield AgentEvent("plan_created", {"revision": 1, "plan": _plan_payload(plan), "planning": state.planning.usage()})
                 break
-            except Exception:
+            except PlanValidationError:
                 state.planning.validation_failures += 1
                 if attempt == 0:
                     state.planning.repair_attempts += 1
