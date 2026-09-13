@@ -18,7 +18,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +42,7 @@ from core.llm_client import LLMClient
 from core.conversation import Conversation
 from core.tool_framework import ToolCapability, ToolRegistry
 from assistant.agent_runner import AgentRunner
+from assistant.strategy import create_strategy, plan_react_controller_from_state
 from assistant.execution_gateway import ExecutionContext, RegistryExecutionGateway, RunPolicy
 from assistant.run_recorder import (
     AgentRunRecord, InvalidContinuation, ResumeClaimConflict, SqlAlchemyRunRecorder,
@@ -108,6 +109,7 @@ class ChatRequest(BaseModel):
     # rejected with 409 instead of duplicating the message/execution).
     client_message_id: str | None = None
     execution_policy: RunPolicyRequest | None = None
+    strategy: Literal["react", "plan_react"] = "react"
 
 
 class SkillToggleRequest(BaseModel):
@@ -323,7 +325,19 @@ async def get_db() -> AsyncSession:
 # present in that request's filtered registry.
 
 
-def _build_tool_registry(user_id: str, db: AsyncSession) -> ToolRegistry:
+def _new_llm() -> LLMClient:
+    """Create the production model client at the request boundary.
+
+    Keeping construction behind this tiny factory lets integration tests inject
+    a scripted client without an HTTP test-mode endpoint or production config
+    branch.
+    """
+    return LLMClient(config)
+
+
+def _build_tool_registry(
+    user_id: str, db: AsyncSession, *, workspace: Path | None = None,
+) -> ToolRegistry:
     personal_memory = PersonalMemory(db)
     registry = ToolRegistry()
     registry.register(WebSearchTool(api_key=config.brave_api_key))
@@ -337,8 +351,8 @@ def _build_tool_registry(user_id: str, db: AsyncSession) -> ToolRegistry:
     registry.register(CurrencyTool())
     registry.register(WeatherTool())
     registry.register(UnitConvertTool())
-    registry.register(ReadFileTool())
-    registry.register(WriteFileTool())
+    registry.register(ReadFileTool(workspace=workspace))
+    registry.register(WriteFileTool(workspace=workspace))
     registry.register(ExtractTextTool())
     registry.register(ReadSpreadsheetTool())
     registry.register(InspectPythonCodeTool())
@@ -350,17 +364,25 @@ def _build_tool_registry(user_id: str, db: AsyncSession) -> ToolRegistry:
 
 def _build_resume_service(db: AsyncSession) -> ApprovalResumeService:
     """Construct the server dependencies for one already-authenticated resume."""
-    llm = LLMClient(config)
+    llm = _new_llm()
 
     async def registry_factory(user_id: int) -> ToolRegistry:
         tools = _build_tool_registry(str(user_id), db)
         enabled = await tool_store.get_enabled_tool_names(db, user_id)
         return tools.filtered(enabled | tool_store.ALWAYS_ENABLED)
 
-    def runner_factory(tools: ToolRegistry, executor: RegistryExecutionGateway) -> AgentRunner:
+    def runner_factory(
+        tools: ToolRegistry, executor: RegistryExecutionGateway, continuation=None,
+        policy: RunPolicy = SERVER_RUN_POLICY,
+    ) -> AgentRunner:
+        controller = None
+        if continuation is not None and continuation.strategy_state is not None:
+            controller = plan_react_controller_from_state(
+                llm=llm, tools=tools, policy=policy, state=continuation.strategy_state,
+            )
         return AgentRunner(
             llm=llm, tools=tools, max_turns=config.max_agent_turns,
-            tool_timeout=config.tool_timeout, executor=executor,
+            tool_timeout=config.tool_timeout, executor=executor, controller=controller,
         )
 
     return ApprovalResumeService(
@@ -798,7 +820,7 @@ async def chat(
                 break
 
     async def event_stream():
-        llm = LLMClient(config)
+        llm = _new_llm()
         tools = _build_tool_registry(user_id, db)
         enabled_tool_names = await tool_store.get_enabled_tool_names(db, user["id"])
         # Always-enabled infrastructure tools (memory, skill content) stay
@@ -861,13 +883,9 @@ async def chat(
             user_id=user["id"],
             thread_id=thread_id,
             policy_snapshot=run_policy_snapshot(run_policy),
+            strategy_name=req.strategy,
         ))
-        runner = AgentRunner(
-            llm=llm,
-            tools=tools,
-            max_turns=config.max_agent_turns,
-            tool_timeout=config.tool_timeout,
-            executor=RegistryExecutionGateway(
+        gateway = RegistryExecutionGateway(
                 tools,
                 ExecutionContext(
                     user_id=user["id"],
@@ -878,7 +896,10 @@ async def chat(
                 run_policy,
                 tool_timeout=config.tool_timeout,
                 recorder=recorder,
-            ),
+            )
+        runner = create_strategy(
+            req.strategy, llm=llm, tools=tools, max_turns=config.max_agent_turns,
+            policy=run_policy, executor=gateway,
         )
 
         async for chunk in stream_agent_events(

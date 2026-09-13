@@ -181,21 +181,29 @@ trees on Ctrl+C.
 | Category | Command | Requirements |
 |---|---|---|
 | Fast unit tests | `python -m pytest -m "not integration"` | None (deterministic fakes; no network/DB/LLM) |
-| PostgreSQL integration | `python -m pytest -m integration` | Running PostgreSQL with pgvector (`docker compose up -d`) |
+| PostgreSQL integration | `python -m pytest -m integration` | Isolated pgvector test service (`docker compose -f docker-compose.test.yml up -d`) |
 | Everything | `python -m pytest` | Integration tests self-skip when PostgreSQL is unreachable |
 | Migration lifecycle | `python scripts/verify_migrations.py` | Running PostgreSQL |
 | Architecture boundaries | `python scripts/check_imports.py` | None |
 
 The integration suite creates a dedicated `agent_platform_test` database
 from the real migration chain and drops it afterwards; override with
-`ACA_TEST_DATABASE_URL`. It covers message ordering/isolation, toggle
+`ACA_TEST_DATABASE_URL` only when it still targets that exact test-only name.
+It refuses destructive setup for any other name. It covers message ordering/isolation, toggle
 uniqueness and user isolation, LLM-call-log round-trips, transaction
 recovery after failed writes, database constraints (FK, NOT NULL, CHECK,
 uniqueness, HNSW index preservation), idempotency races, and health/
 readiness (including schema-mismatch detection).
 
+See [approval workflow testing](docs/APPROVAL_WORKFLOW_TESTING.md) for the
+isolated database commands and deterministic chat â†’ approval â†’ resume demo.
+
 Frontend checks: `npx tsc --noEmit` and `npm run build` (run in
 `apps/assistant-web`).
+
+For offline control conformance and optional live-model behaviour evaluation,
+see [governed agent evaluations](docs/AGENT_CONTROL_EVALUATIONS.md). The
+default scripted suite uses only temporary/in-memory evaluation tools.
 
 ## Configuration
 

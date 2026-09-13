@@ -50,7 +50,7 @@ aca = "aca.cli.main:app"
 assistant-server = "assistant.server:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/core", "src/aca", "src/assistant"]
+packages = ["src/core", "src/aca", "src/assistant", "evaluations"]
 
 [tool.pytest.ini_options]
 addopts = "-v --tb=short"

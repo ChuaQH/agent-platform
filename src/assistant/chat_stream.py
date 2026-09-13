@@ -104,6 +104,10 @@ async def stream_agent_events(
                 yield _sse("text", event.data)
             elif event.type == "tool_call":
                 yield _sse("tool_call", event.data)
+            elif event.type in {"plan_created", "plan_updated", "plan_invalid", "plan_fallback"}:
+                # Plan data is already validated/safe guidance. Older clients
+                # may ignore this additive SSE event without affecting chat.
+                yield _sse(event.type, event.data)
             elif event.type == "approval_required":
                 if recorder is not None and run_id is not None:
                     continuation = runner.continuation
@@ -197,6 +201,11 @@ async def stream_agent_events(
     if result.waiting_for_approval:
         # The gateway already committed run/action waiting state. This is not
         # terminal and deliberately has no done event.
+        if result.pending_action_id:
+            yield _sse("waiting_for_approval", {
+                "run_id": run_id,
+                "action_id": result.pending_action_id,
+            })
         return
 
     if result.limit_reached:
@@ -264,6 +273,8 @@ async def stream_resume_events(
                 )
             elif event.type == "tool_call":
                 yield _sse("tool_call", event.data)
+            elif event.type in {"plan_created", "plan_updated", "plan_invalid", "plan_fallback"}:
+                yield _sse(event.type, event.data)
             elif event.type == "tool_result":
                 payload = {
                     "id": event.data["id"], "name": event.data["name"],

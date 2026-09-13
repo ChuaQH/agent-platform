@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -84,13 +85,17 @@ async def paused(*, remaining: list[dict] | None = None):
     return recorder, write, registry, result
 
 
-def service(recorder: InMemoryRunRecorder, registry: ToolRegistry, *, current: RunPolicy | None = None, llm=None):
+def service(
+    recorder: InMemoryRunRecorder, registry: ToolRegistry, *,
+    current: RunPolicy | None = None, llm=None, clock=None,
+):
     return ApprovalResumeService(
         recorder=recorder, registry_factory=lambda user_id: registry,
         current_policy=lambda: current or policy(),
         runner_factory=lambda tools, executor: AgentRunner(
             llm or ScriptedLLM([LLMResponse(content="done")]), tools, 4, executor=executor,
         ),
+        clock=clock,
     )
 
 
@@ -159,6 +164,21 @@ async def test_denied_and_corrupt_continuation_do_not_dispatch() -> None:
     await recorder.decide_approval(result.action_id, 7, recorder.approvals[result.action_id].fingerprint, "approved")
     with pytest.raises(InvalidContinuation):
         await collect(service(recorder, registry).events(user_id=7, run_id="run"))
+    assert write.calls == []
+
+
+@pytest.mark.asyncio
+async def test_injected_clock_expires_pending_approval_without_dispatch() -> None:
+    recorder, write, registry, result = await paused()
+    fixed_now = datetime(2040, 1, 1, tzinfo=timezone.utc)
+    approval = recorder.approvals[result.action_id]
+    recorder.approvals[result.action_id] = replace(
+        approval, expires_at=fixed_now - timedelta(seconds=1),
+    )
+
+    events = await collect(service(recorder, registry, clock=lambda: fixed_now).events(user_id=7, run_id="run"))
+
+    assert events[0].data["status"] == "approval_expired"
     assert write.calls == []
 
 

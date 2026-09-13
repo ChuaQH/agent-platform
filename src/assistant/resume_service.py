@@ -27,7 +27,7 @@ from assistant.run_recorder import (
 
 RegistryFactory = Callable[[int], ToolRegistry | Awaitable[ToolRegistry]]
 PolicyProvider = Callable[[], RunPolicy | Awaitable[RunPolicy]]
-RunnerFactory = Callable[[ToolRegistry, RegistryExecutionGateway], AgentRunner]
+RunnerFactory = Callable[..., AgentRunner]
 
 
 def _intersection(left: RunPolicy, right: RunPolicy) -> RunPolicy:
@@ -208,15 +208,30 @@ class ApprovalResumeService:
             )
             raise InvalidContinuation("invalid continuation budget") from exc
 
+        try:
+            runner = self._make_runner(registry, gateway, continuation, policy)
+        except (TypeError, ValueError) as exc:
+            # A corrupted plan-react state is rejected before resolving or
+            # dispatching the already-approved action.
+            await self._recorder.transition_run(
+                run_id, AgentRunStatus.FAILED, terminal_error_category="invalid_strategy_state",
+            )
+            raise InvalidContinuation("invalid strategy continuation state") from exc
         resolved = await self._resolve_pending(gateway, claim)
         yield self._tool_result_event(claim.action.provider_tool_call_id, claim.action.tool_name, resolved)
         conversation.add_tool_result(
             claim.action.provider_tool_call_id or continuation.pending_tool_call_id,
             claim.action.tool_name, resolved.to_model_text(),
         )
+        # A denial/expiry is a completed normalized result.  The controller
+        # may safely replan now; approved actions are also observed but do not
+        # trigger a plan change by themselves.
+        update = await runner.observe_tool_batch([resolved])
+        for event in update.events:
+            yield event
 
         async for event in self._run_remaining(
-            continuation, conversation, gateway,
+            continuation, conversation, gateway, runner,
         ):
             yield event
             if event.type == "waiting":
@@ -224,7 +239,6 @@ class ApprovalResumeService:
 
         # This uses the normal AgentRunner loop after every batch result is in
         # the conversation; the coordinator never makes an LLM request itself.
-        runner = self._runner_factory(registry, gateway)
         usage = continuation.budget.get("llm_usage")
         async for event in runner.run(
             conversation, start_turn=continuation.turn,
@@ -254,6 +268,21 @@ class ApprovalResumeService:
         })
         yield AgentEvent("done", {"run_id": run_id})
 
+    def _make_runner(
+        self, registry: ToolRegistry, gateway: RegistryExecutionGateway,
+        continuation: RunnerContinuation, policy: RunPolicy,
+    ) -> AgentRunner:
+        """Keep old two-argument test factories compatible during v2 rollout."""
+        try:
+            parameters = inspect.signature(self._runner_factory).parameters
+            if len(parameters) >= 4:
+                return self._runner_factory(registry, gateway, continuation, policy)
+            if len(parameters) >= 3:
+                return self._runner_factory(registry, gateway, continuation)
+        except (TypeError, ValueError):
+            pass
+        return self._runner_factory(registry, gateway)
+
     async def _resolve_pending(
         self, gateway: RegistryExecutionGateway, claim: ResumableRunClaim,
     ) -> ToolExecutionResult:
@@ -279,7 +308,7 @@ class ApprovalResumeService:
 
     async def _run_remaining(
         self, continuation: RunnerContinuation, conversation: Conversation,
-        gateway: RegistryExecutionGateway,
+        gateway: RegistryExecutionGateway, runner: AgentRunner,
     ) -> AsyncGenerator[AgentEvent, None]:
         for index, call in enumerate(continuation.remaining_tool_calls):
             function = call.get("function")
@@ -303,7 +332,8 @@ class ApprovalResumeService:
             execution = await gateway.execute(tool_name=name, raw_arguments=raw, tool_call_id=call_id)
             if execution.status == "approval_required":
                 replacement = RunnerContinuation(
-                    version=1, conversation_messages=list(conversation.messages),
+                    version=2 if continuation.strategy_state else 1,
+                    conversation_messages=list(conversation.messages),
                     static_prefix_length=conversation.static_prefix_length,
                     static_prefix_hash=conversation.static_prefix_hash,
                     turn=continuation.turn, pending_action_id=execution.action_id or "",
@@ -315,6 +345,7 @@ class ApprovalResumeService:
                         "cumulative_tool_execution_seconds": gateway.budget.cumulative_tool_execution_seconds,
                         "llm_usage": continuation.budget.get("llm_usage", {}),
                     },
+                    strategy_state=runner.strategy_state(),
                 )
                 await self._recorder.save_continuation(gateway.context.run_id or "", asdict(replacement))
                 yield AgentEvent("approval_required", {
@@ -326,6 +357,9 @@ class ApprovalResumeService:
                 return
             yield self._tool_result_event(call_id, name, execution)
             conversation.add_tool_result(call_id, name, execution.to_model_text())
+            update = await runner.observe_tool_batch([execution])
+            for event in update.events:
+                yield event
 
     @staticmethod
     def _tool_result_event(call_id: str | None, name: str, execution: ToolExecutionResult) -> AgentEvent:

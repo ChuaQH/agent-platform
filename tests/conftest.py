@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import asyncpg
 import pytest
@@ -35,11 +36,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 TEST_DATABASE_URL = os.environ.get(
     "ACA_TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/agent_platform_test",
+    "postgresql+asyncpg://postgres:postgres@localhost:5433/agent_platform_test",
 )
 
 TEST_DB_NAME = "agent_platform_test"
 MAINTENANCE_DB = "postgres"
+
+# Keep any application module imported by tests pointed at the dedicated test
+# database.  The destructive guard below still refuses a differently named
+# target before creating, truncating, or dropping anything.
+os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
 
 ALL_TABLES = (
     "users",
@@ -53,6 +59,11 @@ ALL_TABLES = (
     "skills",
     "user_skill_toggles",
     "user_tool_toggles",
+    "agent_runs",
+    "tool_actions",
+    "tool_action_events",
+    "tool_action_approvals",
+    "agent_run_continuations",
 )
 
 
@@ -64,6 +75,23 @@ def _asyncpg_url(url: str) -> str:
 def _maintenance_url(url: str) -> str:
     """Same credentials, but connecting to the `postgres` maintenance DB."""
     return _asyncpg_url(url).rsplit("/", 1)[0] + f"/{MAINTENANCE_DB}"
+
+
+def _validated_test_database_name(url: str) -> str:
+    """Return the database name only when it is our exact disposable target.
+
+    This check deliberately happens immediately before every destructive
+    operation.  A typo in ``ACA_TEST_DATABASE_URL`` must never turn an
+    integration run into a development or production database reset.
+    """
+    parsed = urlparse(_asyncpg_url(url))
+    database_name = unquote(parsed.path.lstrip("/"))
+    if database_name != TEST_DB_NAME:
+        raise RuntimeError(
+            "Refusing destructive integration setup: ACA_TEST_DATABASE_URL "
+            f"must target exactly {TEST_DB_NAME!r}, not {database_name!r}."
+        )
+    return database_name
 
 
 def _run_alembic(*args: str, database_url: str | None = None) -> None:
@@ -85,18 +113,20 @@ def _run_alembic(*args: str, database_url: str | None = None) -> None:
 
 
 async def _recreate_database() -> None:
+    database_name = _validated_test_database_name(TEST_DATABASE_URL)
     conn = await asyncpg.connect(_maintenance_url(TEST_DATABASE_URL))
     try:
-        await conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}" WITH (FORCE)')
-        await conn.execute(f'CREATE DATABASE "{TEST_DB_NAME}"')
+        await conn.execute(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')
+        await conn.execute(f'CREATE DATABASE "{database_name}"')
     finally:
         await conn.close()
 
 
 async def _drop_database() -> None:
+    database_name = _validated_test_database_name(TEST_DATABASE_URL)
     conn = await asyncpg.connect(_maintenance_url(TEST_DATABASE_URL))
     try:
-        await conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}" WITH (FORCE)')
+        await conn.execute(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')
     finally:
         await conn.close()
 
@@ -145,6 +175,7 @@ async def session_factory(migrated_test_db: str):
 @pytest.fixture(scope="session")
 def migrated_test_db_old() -> str:
     """A second test database left at revision 006 (for readiness checks)."""
+    _validated_test_database_name(TEST_DATABASE_URL)
     old_name = f"{TEST_DB_NAME}_old"
     # Keep the original +asyncpg scheme: this URL goes to the alembic
     # subprocess (SQLAlchemy's postgresql:// would resolve to psycopg2).

@@ -19,7 +19,7 @@ import os
 
 TEST_DATABASE_URL = os.environ.get(
     "ACA_TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/agent_platform_test",
+    "postgresql+asyncpg://postgres:postgres@localhost:5433/agent_platform_test",
 )
 
 # The FastAPI app reads DATABASE_URL when `assistant.server` is first
@@ -525,4 +525,4 @@ async def test_readiness_detects_schema_mismatch(migrated_test_db_old) -> None:
 
 
 def test_alembic_head_revision_resolves_without_database() -> None:
-    assert server_module._alembic_head_revision() == "009"
+    assert server_module._alembic_head_revision() == "010"

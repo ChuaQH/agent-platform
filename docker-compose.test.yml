@@ -1,0 +1,25 @@
+# Disposable pgvector instance used only by the integration suite.
+# It intentionally has a distinct container, volume, port, and database name
+# from docker-compose.yml (the development database).
+name: agent-platform-test
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: agent-platform-test-db
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: agent_platform_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata_test:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata_test:

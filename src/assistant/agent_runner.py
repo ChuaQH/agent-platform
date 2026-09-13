@@ -80,6 +80,24 @@ class AgentEvent:
 
 
 @dataclass
+class ControllerUpdate:
+    """Safe runner-controller output; controllers never dispatch tools."""
+
+    guidance: str | None = None
+    events: list[AgentEvent] = field(default_factory=list)
+
+
+class RunnerController(Protocol):
+    """Optional strategy hook around the unchanged ReAct model/tool loop."""
+
+    async def before_executor_turn(self, turn: int) -> ControllerUpdate: ...
+    async def after_tool_batch(
+        self, results: list[ToolExecutionResult], budget: dict[str, object],
+    ) -> ControllerUpdate: ...
+    def serialize_state(self) -> dict[str, Any] | None: ...
+
+
+@dataclass
 class LlmCallRecord:
     """Per-turn metadata captured by the runner for the LLM call log."""
 
@@ -121,6 +139,7 @@ class RunnerContinuation:
     pending_tool_call_id: str
     remaining_tool_calls: list[dict[str, Any]]
     budget: dict[str, object]
+    strategy_state: dict[str, Any] | None = None
 
     @classmethod
     def from_persisted(cls, state: dict[str, Any]) -> "RunnerContinuation":
@@ -130,7 +149,21 @@ class RunnerContinuation:
             "static_prefix_hash", "turn", "pending_action_id",
             "pending_tool_call_id", "remaining_tool_calls", "budget",
         }
-        if set(state) != required or state.get("version") != 1:
+        version = state.get("version")
+        if version == 1:
+            if set(state) == required | {"strategy_state"} and state.get("strategy_state") is None:
+                state = {key: value for key, value in state.items() if key != "strategy_state"}
+            if set(state) != required:
+                raise ValueError("unsupported continuation version")
+            state = {**state, "strategy_state": None}
+        elif version == 2:
+            if set(state) != required | {"strategy_state"}:
+                raise ValueError("unsupported continuation version")
+            strategy_state = state.get("strategy_state")
+            if (not isinstance(strategy_state, dict)
+                    or strategy_state.get("strategy_name") not in {"react", "plan_react"}):
+                raise ValueError("invalid strategy continuation state")
+        else:
             raise ValueError("unsupported continuation version")
         if (not isinstance(state["conversation_messages"], list)
                 or not all(isinstance(message, dict) for message in state["conversation_messages"])
@@ -189,6 +222,7 @@ class AgentRunner:
         max_turns: int,
         tool_timeout: float | None = None,
         executor: ToolCallExecutor | None = None,
+        controller: RunnerController | None = None,
     ) -> None:
         self._llm = llm
         self._tools = tools
@@ -208,6 +242,7 @@ class AgentRunner:
             ),
             tool_timeout=tool_timeout,
         )
+        self._controller = controller
         self.result: AgentResult | None = None
         self.continuation: RunnerContinuation | None = None
         self._usage_totals: dict[str, int] = {
@@ -225,6 +260,12 @@ class AgentRunner:
             tool_call_id=tool_call_id,
         )
 
+    async def observe_tool_batch(self, results: list[ToolExecutionResult]) -> ControllerUpdate:
+        """Let a strategy observe normalized results without crossing the gateway."""
+        if self._controller is None:
+            return ControllerUpdate()
+        return await self._controller.after_tool_batch(results, self.execution_budget_snapshot() or {})
+
     def execution_budget_snapshot(self) -> dict[str, object] | None:
         """Expose a safe final budget snapshot when the executor has one."""
         budget = getattr(self._executor, "budget", None)
@@ -236,7 +277,12 @@ class AgentRunner:
             "cumulative_tool_execution_seconds": budget.cumulative_tool_execution_seconds,
         }
         snapshot["llm_usage"] = dict(self._usage_totals)
+        if self._controller is not None:
+            snapshot["strategy_state"] = self._controller.serialize_state()
         return snapshot
+
+    def strategy_state(self) -> dict[str, Any] | None:
+        return self._controller.serialize_state() if self._controller is not None else None
 
     async def run(
         self, conversation: Conversation, *, start_turn: int = 0,
@@ -264,10 +310,20 @@ class AgentRunner:
             "turns": start_turn,
         }
         for turn_number in range(start_turn + 1, self.max_turns + 1):
+            controller_update = ControllerUpdate()
+            if self._controller is not None:
+                controller_update = await self._controller.before_executor_turn(turn_number)
+                for event in controller_update.events:
+                    yield event
             turn_start = time.monotonic()
             try:
+                model_messages = conversation.get_messages_for_api()
+                if controller_update.guidance:
+                    # Guidance is ephemeral model context, deliberately not
+                    # appended to durable conversation history.
+                    model_messages.append({"role": "assistant", "content": controller_update.guidance})
                 response = await self._llm.chat(
-                    messages=conversation.get_messages_for_api(),
+                    messages=model_messages,
                     tools=self._tools.to_openai_schemas(),
                 )
             except Exception as e:
@@ -336,6 +392,7 @@ class AgentRunner:
                     tool_calls=response.tool_calls,
                 )
 
+                batch_results: list[ToolExecutionResult] = []
                 for call_index, tc in enumerate(response.tool_calls):
                     tool_name = tc["function"]["name"]
                     raw_arguments = tc["function"].get("arguments", "")
@@ -357,13 +414,15 @@ class AgentRunner:
                         waiting_for_approval = True
                         pending_action_id = execution.action_id
                         self.continuation = RunnerContinuation(
-                            version=1, conversation_messages=list(conversation.messages),
+                            version=2 if self._controller and self._controller.serialize_state() else 1,
+                            conversation_messages=list(conversation.messages),
                             static_prefix_length=conversation.static_prefix_length,
                             static_prefix_hash=conversation.static_prefix_hash,
                             turn=turn_number, pending_action_id=execution.action_id or "",
                             pending_tool_call_id=tc["id"],
                             remaining_tool_calls=list(response.tool_calls[call_index + 1:]),
                             budget=self.execution_budget_snapshot() or {},
+                            strategy_state=(self._controller.serialize_state() if self._controller else None),
                         )
                         yield AgentEvent("approval_required", {
                             "id": tc["id"], "name": tool_name,
@@ -372,6 +431,7 @@ class AgentRunner:
                         })
                         break
                     model_result = execution.to_model_text()
+                    batch_results.append(execution)
 
                     tool_result_data = {
                         "id": tc["id"],
@@ -397,6 +457,10 @@ class AgentRunner:
 
                 if waiting_for_approval:
                     break
+
+                controller_update = await self.observe_tool_batch(batch_results)
+                for event in controller_update.events:
+                    yield event
 
                 continue
 

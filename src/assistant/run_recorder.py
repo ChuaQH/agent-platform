@@ -191,6 +191,7 @@ class AgentRunRecord:
     user_id: int
     thread_id: str
     policy_snapshot: dict[str, Any]
+    strategy_name: str = "react"
     status: AgentRunStatus = AgentRunStatus.RUNNING
     final_budget_snapshot: dict[str, Any] | None = None
     terminal_error_category: str | None = None
@@ -448,7 +449,7 @@ class InMemoryRunRecorder:
         return approval
 
     async def save_continuation(self, run_id: str, state: dict[str, Any]) -> None:
-        if state.get("version") != 1 or not isinstance(state.get("conversation_messages"), list):
+        if state.get("version") not in {1, 2} or not isinstance(state.get("conversation_messages"), list):
             raise ValueError("invalid continuation")
         self.continuations[run_id] = json.loads(json.dumps(state))
 
@@ -493,7 +494,7 @@ class InMemoryRunRecorder:
             if run.status is not AgentRunStatus.WAITING_FOR_APPROVAL:
                 raise ResumeClaimConflict("run is not waiting for approval")
             state = self.continuations.get(run_id)
-            if not isinstance(state, dict) or state.get("version") != 1:
+            if not isinstance(state, dict) or state.get("version") not in {1, 2}:
                 raise InvalidContinuation("unsupported continuation")
             action_id = state.get("pending_action_id")
             if not isinstance(action_id, str) or not action_id:
@@ -644,14 +645,14 @@ class SqlAlchemyRunRecorder:
         return approval
 
     async def save_continuation(self, run_id: str, state: dict[str, Any]) -> None:
-        if state.get("version") != 1 or not isinstance(state.get("conversation_messages"), list):
+        if state.get("version") not in {1, 2} or not isinstance(state.get("conversation_messages"), list):
             raise ValueError("invalid continuation")
         now = utcnow()
         current = (await self._db.execute(select(AgentRunContinuation).where(AgentRunContinuation.run_id == run_id))).scalar_one_or_none()
         if current is None:
-            self._db.add(AgentRunContinuation(run_id=run_id, version=1, state=state, created_at=now, updated_at=now))
+            self._db.add(AgentRunContinuation(run_id=run_id, version=state["version"], state=state, created_at=now, updated_at=now))
         else:
-            current.version, current.state, current.updated_at = 1, state, now
+            current.version, current.state, current.updated_at = state["version"], state, now
         await self._db.commit()
 
     async def clear_continuation(self, run_id: str) -> None:
@@ -669,6 +670,7 @@ class SqlAlchemyRunRecorder:
         return AgentRunRecord(
             run_id=run.run_id, request_id=run.request_id, user_id=run.user_id,
             thread_id=run.thread_id, policy_snapshot=run.policy_snapshot,
+            strategy_name=run.strategy_name,
             status=AgentRunStatus(run.status),
             final_budget_snapshot=run.final_budget_snapshot,
             terminal_error_category=run.terminal_error_category,
@@ -724,7 +726,8 @@ class SqlAlchemyRunRecorder:
             ).with_for_update()
         )).scalar_one_or_none()
         state = continuation.state if continuation is not None else None
-        if not isinstance(state, dict) or continuation.version != 1 or state.get("version") != 1:
+        if (not isinstance(state, dict) or continuation.version not in {1, 2}
+                or state.get("version") != continuation.version):
             raise InvalidContinuation("unsupported continuation")
         action_id = state.get("pending_action_id")
         if not isinstance(action_id, str) or not action_id:

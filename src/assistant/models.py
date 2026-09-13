@@ -349,6 +349,7 @@ class AgentRun(Base):
     )
     status: Mapped[str] = mapped_column(String, nullable=False)
     policy_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    strategy_name: Mapped[str] = mapped_column(String, nullable=False, default="react")
     final_budget_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     terminal_error_category: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

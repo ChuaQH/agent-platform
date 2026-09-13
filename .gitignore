@@ -29,6 +29,10 @@ apps/*/.env.local
 # Test cache
 .pytest_cache/
 
+# Reproducible local evaluation artifacts
+evaluation-results/
+.tmp-eval-results/
+
 # Personal Notes
 src/assistant/personal_notes.md
 PROJECT_BRIEF.md
