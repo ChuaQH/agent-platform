@@ -16,11 +16,13 @@ import json
 import logging
 import os
 import uuid
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -47,6 +49,7 @@ from assistant.execution_gateway import ExecutionContext, RegistryExecutionGatew
 from assistant.run_recorder import (
     AgentRunRecord, InvalidContinuation, ResumeClaimConflict, SqlAlchemyRunRecorder,
 )
+from assistant.run_audit import audit_view, run_summary_view
 from assistant.chat_stream import stream_agent_events, stream_resume_events
 from assistant.resume_service import ApprovalResumeService
 from core.tools.calculator import CalculatorTool
@@ -149,6 +152,106 @@ class PendingApprovalItem(BaseModel):
 
 class PendingApprovalsResponse(BaseModel):
     approvals: list[PendingApprovalItem]
+
+
+class RunAuditPolicy(BaseModel):
+    allowed_capabilities: list[str]
+    allowed_tools: list[str] | None = None
+    approval_required_capabilities: list[str]
+    approval_required_tools: list[str] | None = None
+    max_tool_calls: int | None = None
+    max_calls_per_tool: int | None = None
+    max_cumulative_tool_execution_seconds: float | int | None = None
+
+
+class RunAuditBudget(BaseModel):
+    tool_call_attempts: int | float = 0
+    tool_calls_by_name: dict[str, int] = Field(default_factory=dict)
+    cumulative_tool_execution_seconds: float | int = 0
+    llm_usage: dict[str, int] = Field(default_factory=dict)
+
+
+class RunAuditApproval(BaseModel):
+    status: str
+    requested_at: datetime
+    expires_at: datetime
+    decided_at: datetime | None = None
+
+
+class RunAuditActionEvent(BaseModel):
+    state: str
+    timestamp: datetime
+    reason_code: str | None = None
+
+
+class RunAuditAction(BaseModel):
+    action_id: str
+    sequence: int
+    tool_name: str
+    required_capabilities: list[str]
+    fingerprint: str | None = None
+    arguments_preview: Any | None = None
+    status: str
+    normalized_result_status: str | None = None
+    reason_code: str | None = None
+    proposed_at: datetime
+    execution_started_at: datetime | None = None
+    completed_at: datetime | None = None
+    approval_required: bool
+    approval: RunAuditApproval | None = None
+    dispatched: bool
+    events: list[RunAuditActionEvent]
+
+
+class RunAuditTimelineEvent(BaseModel):
+    sequence: int
+    action_id: str | None = None
+    action_sequence: int | None = None
+    state: str
+    label: str
+    timestamp: datetime
+    reason_code: str | None = None
+
+
+class RunAuditRun(BaseModel):
+    run_id: str
+    thread_id: str
+    strategy: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+    terminal_reason: str | None = None
+    policy: RunAuditPolicy
+    budget: RunAuditBudget
+
+
+class RunAuditResponse(BaseModel):
+    run: RunAuditRun
+    actions: list[RunAuditAction]
+    timeline: list[RunAuditTimelineEvent]
+
+
+class ThreadRunSummary(BaseModel):
+    run_id: str
+    strategy: str
+    status: Literal["running", "waiting_for_approval", "completed", "failed", "cancelled"]
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+    terminal_reason: str | None = None
+    action_count: int
+    executed_count: int
+    succeeded_count: int
+    rejected_count: int
+    waiting_for_approval_count: int
+    uncertain_count: int
+    has_pending_approval: bool
+
+
+class ThreadRunsResponse(BaseModel):
+    runs: list[ThreadRunSummary]
+    next_cursor: str | None = None
 
 
 # ── Config ─────────────────────────────────────────────────────────────────
@@ -642,6 +745,50 @@ async def update_thread_title(
     return result
 
 
+def _encode_run_cursor(updated_at: datetime, run_id: str) -> str:
+    payload = json.dumps({"updated_at": updated_at.isoformat(), "run_id": run_id}, separators=(",", ":"))
+    return urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_run_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        decoded = urlsafe_b64decode((cursor + "=" * (-len(cursor) % 4)).encode("ascii"))
+        value = json.loads(decoded)
+        updated_at = datetime.fromisoformat(value["updated_at"])
+        run_id = value["run_id"]
+        if updated_at.tzinfo is None or not isinstance(run_id, str) or not run_id:
+            raise ValueError
+        return updated_at, run_id
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=422, detail="Invalid run cursor") from None
+
+
+@app.get("/api/threads/{thread_id}/runs", response_model=ThreadRunsResponse)
+async def list_thread_runs(
+    request: Request,
+    thread_id: str,
+    page_size: int = Query(default=20, ge=1, le=50),
+    cursor: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return bounded safe summaries for a thread's authenticated owner."""
+    user_id = await _get_user_id(request, db)
+    thread = await thread_store.get_thread_for_user(db, thread_id, user_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    summaries = await SqlAlchemyRunRecorder(db).list_run_summaries_for_thread(
+        thread_id, user_id, page_size=page_size + 1,
+        cursor=_decode_run_cursor(cursor) if cursor else None,
+    )
+    has_more = len(summaries) > page_size
+    page = summaries[:page_size]
+    return {
+        "runs": [run_summary_view(summary) for summary in page],
+        "next_cursor": _encode_run_cursor(page[-1].updated_at, page[-1].run_id)
+        if has_more and page else None,
+    }
+
+
 # ── Feedback endpoint ────────────────────────────────────────────────────
 
 
@@ -916,6 +1063,7 @@ async def chat(
             first_user_msg=first_user_msg,
             recorder=recorder,
             run_id=run_id,
+            run_strategy=req.strategy,
         ):
             yield chunk
 
@@ -929,6 +1077,19 @@ async def chat(
             "X-Thread-Id": thread_id,
         },
     )
+
+
+@app.get("/api/runs/{run_id}/audit", response_model=RunAuditResponse)
+async def get_run_audit(
+    request: Request, run_id: str, db: AsyncSession = Depends(get_db),
+):
+    """Return an owner-scoped, redacted read model for one governed run."""
+    user = await _get_user(request, db)
+    audit = await SqlAlchemyRunRecorder(db).get_audit_run_for_user(run_id, user["id"])
+    # A scoped lookup makes a foreign run indistinguishable from an unknown one.
+    if audit is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return audit_view(audit)
 
 
 @app.post("/api/runs/{run_id}/resume")

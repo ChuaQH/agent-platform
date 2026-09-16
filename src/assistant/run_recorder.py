@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Protocol
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from assistant.models import AgentRun, AgentRunContinuation, ToolAction, ToolActionApproval, ToolActionEvent
@@ -289,6 +289,57 @@ class ResumableRunClaim:
     approval: ApprovalRecord
 
 
+@dataclass(frozen=True)
+class AuditApprovalRecord:
+    """Safe durable approval facts used only by the audit read model."""
+
+    fingerprint: str
+    requested_at: datetime
+    expires_at: datetime
+    decision: str | None
+    decided_at: datetime | None
+
+
+@dataclass(frozen=True)
+class AuditActionRecord:
+    """One ordered action plus its append-only events and optional approval."""
+
+    action: ToolActionRecord
+    events: tuple[ToolActionEventRecord, ...]
+    approval: AuditApprovalRecord | None
+
+
+@dataclass(frozen=True)
+class AuditRunRecord:
+    """Owner-scoped durable material for a presentation-only inspector."""
+
+    run: AgentRunRecord
+    actions: tuple[AuditActionRecord, ...]
+
+
+@dataclass(frozen=True)
+class RunSummaryRecord:
+    """Safe aggregate facts for one thread-owned governed run."""
+
+    run_id: str
+    strategy_name: str
+    status: AgentRunStatus
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None
+    terminal_error_category: str | None
+    action_count: int
+    executed_count: int
+    succeeded_count: int
+    rejected_count: int
+    waiting_for_approval_count: int
+    uncertain_count: int
+
+    @property
+    def has_pending_approval(self) -> bool:
+        return self.waiting_for_approval_count > 0
+
+
 class ResumeClaimConflict(RuntimeError):
     """A run was not claimable; callers must execute nothing."""
 
@@ -323,6 +374,11 @@ class RunRecorder(Protocol):
     async def save_continuation(self, run_id: str, state: dict[str, Any]) -> None: ...
     async def clear_continuation(self, run_id: str) -> None: ...
     async def get_run_for_user(self, run_id: str, user_id: int) -> AgentRunRecord | None: ...
+    async def get_audit_run_for_user(self, run_id: str, user_id: int) -> AuditRunRecord | None: ...
+    async def list_run_summaries_for_thread(
+        self, thread_id: str, user_id: int, *, page_size: int,
+        cursor: tuple[datetime, str] | None = None,
+    ) -> list[RunSummaryRecord]: ...
     async def get_continuation_for_user(self, run_id: str, user_id: int) -> dict[str, Any] | None: ...
     async def get_pending_approvals_for_thread(self, thread_id: str, user_id: int) -> list[PendingApprovalPresentation]: ...
     async def claim_resumable_run(self, run_id: str, user_id: int, *, now: datetime | None = None) -> ResumableRunClaim | None: ...
@@ -355,6 +411,8 @@ class NullRunRecorder:
     async def save_continuation(self, run_id: str, state: dict[str, Any]) -> None: return None
     async def clear_continuation(self, run_id: str) -> None: return None
     async def get_run_for_user(self, run_id: str, user_id: int) -> AgentRunRecord | None: return None
+    async def get_audit_run_for_user(self, run_id: str, user_id: int) -> AuditRunRecord | None: return None
+    async def list_run_summaries_for_thread(self, thread_id: str, user_id: int, *, page_size: int, cursor: tuple[datetime, str] | None = None) -> list[RunSummaryRecord]: return []
     async def get_continuation_for_user(self, run_id: str, user_id: int) -> dict[str, Any] | None: return None
     async def get_pending_approvals_for_thread(self, thread_id: str, user_id: int) -> list[PendingApprovalPresentation]: return []
     async def claim_resumable_run(self, run_id: str, user_id: int, *, now: datetime | None = None) -> ResumableRunClaim | None:
@@ -459,6 +517,68 @@ class InMemoryRunRecorder:
     async def get_run_for_user(self, run_id: str, user_id: int) -> AgentRunRecord | None:
         run = self.runs.get(run_id)
         return run if run is not None and run.user_id == user_id else None
+
+    async def get_audit_run_for_user(self, run_id: str, user_id: int) -> AuditRunRecord | None:
+        run = await self.get_run_for_user(run_id, user_id)
+        if run is None:
+            return None
+        actions = sorted(
+            (item for item in self.actions.values() if item.run_id == run_id),
+            key=lambda item: item.sequence,
+        )
+        rows: list[AuditActionRecord] = []
+        for action in actions:
+            events = tuple(event for event in self.events if event.action_id == action.action_id)
+            approval = self.approvals.get(action.action_id)
+            decision_event = next((event for event in reversed(events) if event.to_status in {
+                ToolActionStatus.APPROVED, ToolActionStatus.DENIED, ToolActionStatus.EXPIRED,
+            }), None)
+            rows.append(AuditActionRecord(
+                action=action,
+                events=events,
+                approval=(AuditApprovalRecord(
+                    fingerprint=approval.fingerprint, requested_at=action.created_at,
+                    expires_at=approval.expires_at, decision=approval.decision,
+                    decided_at=decision_event.created_at if decision_event else None,
+                ) if approval is not None else None),
+            ))
+        return AuditRunRecord(run=run, actions=tuple(rows))
+
+    async def list_run_summaries_for_thread(
+        self, thread_id: str, user_id: int, *, page_size: int,
+        cursor: tuple[datetime, str] | None = None,
+    ) -> list[RunSummaryRecord]:
+        runs = [
+            run for run in self.runs.values()
+            if run.thread_id == thread_id and run.user_id == user_id
+        ]
+        runs.sort(key=lambda run: (run.updated_at, run.run_id), reverse=True)
+        if cursor is not None:
+            cursor_time, cursor_id = cursor
+            runs = [
+                run for run in runs
+                if (run.updated_at, run.run_id) < (cursor_time, cursor_id)
+            ]
+        summaries: list[RunSummaryRecord] = []
+        rejected = {
+            ToolActionStatus.VALIDATION_REJECTED, ToolActionStatus.UNAVAILABLE,
+            ToolActionStatus.POLICY_REJECTED, ToolActionStatus.BUDGET_REJECTED,
+            ToolActionStatus.DENIED, ToolActionStatus.EXPIRED,
+        }
+        for run in runs[:page_size]:
+            actions = [action for action in self.actions.values() if action.run_id == run.run_id]
+            summaries.append(RunSummaryRecord(
+                run_id=run.run_id, strategy_name=run.strategy_name, status=run.status,
+                created_at=run.created_at, updated_at=run.updated_at, finished_at=run.finished_at,
+                terminal_error_category=run.terminal_error_category,
+                action_count=len(actions),
+                executed_count=sum(action.execution_started_at is not None for action in actions),
+                succeeded_count=sum(action.status is ToolActionStatus.SUCCEEDED for action in actions),
+                rejected_count=sum(action.status in rejected for action in actions),
+                waiting_for_approval_count=sum(action.status is ToolActionStatus.PENDING_APPROVAL for action in actions),
+                uncertain_count=sum(action.status is ToolActionStatus.UNCERTAIN for action in actions),
+            ))
+        return summaries
 
     async def get_continuation_for_user(self, run_id: str, user_id: int) -> dict[str, Any] | None:
         if await self.get_run_for_user(run_id, user_id) is None:
@@ -822,6 +942,93 @@ class SqlAlchemyRunRecorder:
     async def get_run_for_user(self, run_id: str, user_id: int) -> AgentRunRecord | None:
         run = (await self._db.execute(select(AgentRun).where(AgentRun.run_id == run_id, AgentRun.user_id == user_id))).scalar_one_or_none()
         return self._run_record(run) if run is not None else None
+
+    async def get_audit_run_for_user(self, run_id: str, user_id: int) -> AuditRunRecord | None:
+        """Read one owned run and all presentation facts without N+1 queries."""
+        rows = (await self._db.execute(
+            select(AgentRun, ToolAction, ToolActionEvent, ToolActionApproval)
+            .outerjoin(ToolAction, ToolAction.run_id == AgentRun.run_id)
+            .outerjoin(ToolActionEvent, ToolActionEvent.action_id == ToolAction.action_id)
+            .outerjoin(ToolActionApproval, ToolActionApproval.action_id == ToolAction.action_id)
+            .where(AgentRun.run_id == run_id, AgentRun.user_id == user_id)
+            .order_by(ToolAction.sequence, ToolActionEvent.id)
+        )).all()
+        if not rows:
+            return None
+        run = self._run_record(rows[0][0])
+        collected: dict[str, dict[str, Any]] = {}
+        for _, action, event, approval in rows:
+            if action is None:
+                continue
+            item = collected.setdefault(action.action_id, {
+                "action": self._action_record(action), "events": [], "approval": approval,
+            })
+            if event is not None:
+                item["events"].append(ToolActionEventRecord(
+                    event_id=event.event_id, action_id=event.action_id,
+                    from_status=ToolActionStatus(event.from_status) if event.from_status else None,
+                    to_status=ToolActionStatus(event.to_status), reason_code=event.reason_code,
+                    created_at=event.created_at,
+                ))
+        audit_actions: list[AuditActionRecord] = []
+        for item in sorted(collected.values(), key=lambda value: value["action"].sequence):
+            approval = item["approval"]
+            audit_actions.append(AuditActionRecord(
+                action=item["action"], events=tuple(item["events"]),
+                approval=(AuditApprovalRecord(
+                    fingerprint=approval.fingerprint, requested_at=approval.created_at,
+                    expires_at=approval.expires_at, decision=approval.decision,
+                    decided_at=approval.decided_at,
+                ) if approval is not None else None),
+            ))
+        return AuditRunRecord(run=run, actions=tuple(audit_actions))
+
+    async def list_run_summaries_for_thread(
+        self, thread_id: str, user_id: int, *, page_size: int,
+        cursor: tuple[datetime, str] | None = None,
+    ) -> list[RunSummaryRecord]:
+        """Read bounded summaries and action counts in one grouped query."""
+        rejected_states = (
+            ToolActionStatus.VALIDATION_REJECTED.value, ToolActionStatus.UNAVAILABLE.value,
+            ToolActionStatus.POLICY_REJECTED.value, ToolActionStatus.BUDGET_REJECTED.value,
+            ToolActionStatus.DENIED.value, ToolActionStatus.EXPIRED.value,
+        )
+        statement = (
+            select(
+                AgentRun,
+                func.count(ToolAction.action_id).label("action_count"),
+                func.count(ToolAction.action_id).filter(ToolAction.execution_started_at.is_not(None)).label("executed_count"),
+                func.count(ToolAction.action_id).filter(ToolAction.status == ToolActionStatus.SUCCEEDED.value).label("succeeded_count"),
+                func.count(ToolAction.action_id).filter(ToolAction.status.in_(rejected_states)).label("rejected_count"),
+                func.count(ToolAction.action_id).filter(ToolAction.status == ToolActionStatus.PENDING_APPROVAL.value).label("waiting_for_approval_count"),
+                func.count(ToolAction.action_id).filter(ToolAction.status == ToolActionStatus.UNCERTAIN.value).label("uncertain_count"),
+            )
+            .outerjoin(ToolAction, ToolAction.run_id == AgentRun.run_id)
+            .where(AgentRun.thread_id == thread_id, AgentRun.user_id == user_id)
+            .group_by(AgentRun.run_id)
+            .order_by(AgentRun.updated_at.desc(), AgentRun.run_id.desc())
+            .limit(page_size)
+        )
+        if cursor is not None:
+            cursor_time, cursor_id = cursor
+            statement = statement.where(or_(
+                AgentRun.updated_at < cursor_time,
+                and_(AgentRun.updated_at == cursor_time, AgentRun.run_id < cursor_id),
+            ))
+        rows = (await self._db.execute(statement)).all()
+        return [RunSummaryRecord(
+            run_id=run.run_id, strategy_name=run.strategy_name,
+            status=AgentRunStatus(run.status), created_at=run.created_at,
+            updated_at=run.updated_at, finished_at=run.finished_at,
+            terminal_error_category=run.terminal_error_category,
+            action_count=action_count, executed_count=executed_count,
+            succeeded_count=succeeded_count, rejected_count=rejected_count,
+            waiting_for_approval_count=waiting_for_approval_count,
+            uncertain_count=uncertain_count,
+        ) for (
+            run, action_count, executed_count, succeeded_count, rejected_count,
+            waiting_for_approval_count, uncertain_count,
+        ) in rows]
 
     async def get_continuation_for_user(self, run_id: str, user_id: int) -> dict[str, Any] | None:
         state = (await self._db.execute(

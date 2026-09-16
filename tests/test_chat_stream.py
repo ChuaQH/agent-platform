@@ -74,6 +74,18 @@ async def _collect(runner: AgentRunner, conversation, db) -> list[str]:
     ]
 
 
+async def _collect_new_run(runner: AgentRunner, conversation, db, recorder) -> list[str]:
+    return [
+        chunk
+        async for chunk in stream_agent_events(
+            runner=runner, conversation=conversation, db=db, thread_id="thread_1",
+            user_id=1, request_id="req_1", model="test-model", provider="test-provider",
+            llm=runner._llm, generate_title=False, first_user_msg="", recorder=recorder,
+            run_id="durable-run", run_strategy="plan_react",
+        )
+    ]
+
+
 def test_success_stream_terminates_with_usage_then_done() -> None:
     llm = ScriptedLLM([
         LLMResponse(content="Hi there!", usage={"prompt_tokens": 10, "completion_tokens": 5}),
@@ -169,3 +181,19 @@ def test_limit_reached_emits_limit_event_before_usage_and_done() -> None:
     assert calculator.calls == 0
     # No tool_call/tool_result events reached the client.
     assert all(e["type"] not in ("tool_call", "tool_result") for e in events)
+
+
+def test_new_durable_run_is_announced_once_before_model_events() -> None:
+    from assistant.run_recorder import AgentRunRecord, InMemoryRunRecorder
+
+    llm = ScriptedLLM([LLMResponse(content="Hi", usage={})])
+    runner = AgentRunner(llm=llm, tools=ToolRegistry(), max_turns=2)
+    recorder = InMemoryRunRecorder()
+    asyncio.run(recorder.create_run(AgentRunRecord(
+        "durable-run", "req_1", 1, "thread_1", {"allowed_capabilities": []}, strategy_name="plan_react",
+    )))
+    events = parse_chunks(asyncio.run(_collect_new_run(runner, make_conversation(), FakeSession(), recorder)))
+    assert [event["type"] for event in events] == ["run_started", "text", "usage", "done"]
+    assert events[0] == {"type": "run_started", "run_id": "durable-run", "strategy": "plan_react", "status": "running"}
+    assert recorder.runs["durable-run"].run_id == events[0]["run_id"]
+    assert "thread_1" not in json.dumps(events[0]) and "arguments" not in events[0]

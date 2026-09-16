@@ -82,11 +82,19 @@ async def stream_agent_events(
     first_user_msg: str,
     recorder: RunRecorder | None = None,
     run_id: str | None = None,
+    run_strategy: str = "react",
 ) -> AsyncGenerator[str, None]:
     """Consume runner events for one chat request: persist, emit SSE, terminate.
 
     Yields wire-ready SSE strings (see module docstring for the protocol).
     """
+    # This is a transport-only control event: it is neither model context nor
+    # persisted chat content. A new durable run is already committed by the
+    # route before this generator begins.
+    if run_id is not None:
+        yield _sse("run_started", {
+            "run_id": run_id, "strategy": run_strategy, "status": "running",
+        })
     try:
         async for event in runner.run(conversation):
             if event.type == "llm_call":

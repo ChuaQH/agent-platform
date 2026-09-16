@@ -27,6 +27,8 @@ tokens are opaque 64-hex strings stored in the `sessions` table with a
 | GET | `/api/tools` | token | Tool definitions merged with the user's toggle state |
 | PUT | `/api/tools/{tool_name}/toggle` | token | `{enabled}` → `{ok}`; 404 for unknown or always-enabled tools |
 | POST | `/api/chat` | token | See below (SSE streaming) |
+| GET | `/api/threads/{thread_id}/runs` | token | Owner-scoped, bounded governed-run summaries for thread Activity |
+| GET | `/api/runs/{run_id}/audit` | token | Owner-scoped, redacted governed-run read model (404 for unknown or foreign run) |
 | POST | `/api/geo` | — | `{latitude, longitude}` → `{ok}` (browser geolocation echo) |
 | GET | `/health` | — | Liveness: `{status: "ok"}` — no dependencies touched |
 | GET | `/ready` | — | Readiness: `{status, database, schema}` or 503 with failure details |
@@ -77,6 +79,46 @@ Every started stream ends in exactly one terminal state:
 
 Client cancellation (aborting the fetch) is not an error: the stream simply
 stops, and no terminal event is emitted.
+
+## Governed-run inspector (`GET /api/runs/{run_id}/audit`)
+
+Returns safe presentation data for the authenticated owner only:
+
+- `run`: status, strategy, timestamps, safe terminal category, effective
+  policy summary, and whitelisted budget/usage counters;
+- `actions`: proposal sequence, tool/capabilities, redacted capped canonical
+  argument preview, lifecycle/result/reason, dispatch indication, and safe
+  approval state/timestamps; and
+- `timeline`: deterministic lifecycle display events ordered by durable action
+  sequence and event insertion order.
+
+It excludes raw model arguments, executable payloads, continuation JSON,
+conversation content, provider reasoning, approval decision reasons, user IDs,
+credentials, and internal exception text. An action fingerprint identifies the
+exact durable action in the approval flow; it is not a digital signature or
+tamper-evidence claim. See [the inspector guide](GOVERNED_RUN_INSPECTOR.md).
+
+## Thread run activity (`GET /api/threads/{thread_id}/runs`)
+
+Returns a bounded, newest-first list of safe run summaries for the authenticated
+thread owner. Unknown and foreign threads both return `404 Thread not found`.
+`page_size` defaults to 20 and must be between 1 and 50. Follow the opaque
+`next_cursor` with the same page size to retrieve the next page; ordering is
+`updated_at DESC, run_id DESC`, so the cursor prevents duplicates or omissions
+where timestamps match.
+
+Each summary contains only run identity, strategy, lifecycle timestamps and
+safe terminal category, aggregate action counts, and a pending-approval flag.
+It deliberately excludes policies, arguments, executable payloads,
+continuations, messages, reasoning, request/user IDs, approval reasons, and
+exception text. Fetch `GET /api/runs/{run_id}/audit` only after a user selects
+a summary for detailed activity.
+
+New chat streams begin with a transport-only `run_started` event containing
+only `run_id`, strategy, and `running` status. It is emitted after the durable
+run is created and before model/tool events; it is neither model context nor
+persisted chat content. Resume streams continue the same run and do not emit a
+second `run_started` event.
 
 ## Google OAuth setup (local)
 

@@ -11,6 +11,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { useThreadListAdapter, ThreadListRefreshContext } from "@/lib/thread-list-adapter";
 import { BackendMessageIdContext } from "@/lib/backend-ids";
 import { ThreadIdContext } from "@/lib/thread-id";
+import { RunInspectorProvider, type ThreadRunSummary } from "@/lib/run-inspector-context";
 import {
   ApprovalProvider,
   approvalStatusFromBackend,
@@ -48,6 +49,8 @@ export function MyRuntimeProvider({
   const currentThreadIdRef = useRef<string | null>(null);
   const [approvals, setApprovals] = useState<Record<string, ApprovalState>>({});
   const approvalsRef = useRef<Record<string, ApprovalState>>({});
+  const [discoveredRuns, setDiscoveredRuns] = useState<readonly ThreadRunSummary[]>([]);
+  const [activityRevision, setActivityRevision] = useState(0);
 
   const setApproval = useCallback((approval: ApprovalState) => {
     setApprovals((previous) => {
@@ -87,6 +90,8 @@ export function MyRuntimeProvider({
     currentThreadIdRef.current = null;
     approvalsRef.current = {};
     setApprovals({});
+    setDiscoveredRuns([]);
+    setActivityRevision((value) => value + 1);
   }, []);
 
   const onSwitchToThread = useCallback((id: string) => {
@@ -95,6 +100,8 @@ export function MyRuntimeProvider({
     currentThreadIdRef.current = id;
     approvalsRef.current = {};
     setApprovals({});
+    setDiscoveredRuns([]);
+    setActivityRevision((value) => value + 1);
 
     (async () => {
       try {
@@ -237,6 +244,20 @@ export function MyRuntimeProvider({
     if (expectedThreadId && currentThreadIdRef.current !== expectedThreadId) return null;
     const update = (updater: (content: AnyPart[]) => void, running = true) => updateAssistantMessage(assistantId, updater, running);
     switch (event.type) {
+      case "run_started": {
+        if (typeof event.run_id === "string" && typeof event.strategy === "string" && typeof event.status === "string") {
+          const now = new Date().toISOString();
+          const summary: ThreadRunSummary = {
+            run_id: event.run_id, strategy: event.strategy,
+            status: "running",
+            created_at: now, updated_at: now, completed_at: null, terminal_reason: null,
+            action_count: 0, executed_count: 0, succeeded_count: 0, rejected_count: 0,
+            waiting_for_approval_count: 0, uncertain_count: 0, has_pending_approval: false,
+          };
+          setDiscoveredRuns((previous) => [summary, ...previous.filter((item) => item.run_id !== summary.run_id)]);
+        }
+        break;
+      }
       case "reasoning": update((content) => content.push({ type: "reasoning", text: String(event.text || "") })); break;
       case "tool_call": update((content) => content.push({ type: "tool-call", toolCallId: String(event.id || ""), toolName: String(event.name || ""), args: event.arguments, status: { type: "running" } })); break;
       case "tool_result": {
@@ -274,12 +295,13 @@ export function MyRuntimeProvider({
       }
       case "waiting_for_approval": {
         setIsRunning(false);
+        setActivityRevision((value) => value + 1);
         update(() => {}, false);
         return "waiting";
       }
-      case "error": update((content) => content.push({ type: "text", text: `\n\n*${String(event.message || "Something went wrong")}*` }), false); setIsRunning(false); return "error";
+      case "error": update((content) => content.push({ type: "text", text: `\n\n*${String(event.message || "Something went wrong")}*` }), false); setIsRunning(false); setActivityRevision((value) => value + 1); return "error";
       case "limit_reached": update((content) => content.push({ type: "text", text: "\n\n*Reached the maximum number of steps. Please continue in a new message.*" })); break;
-      case "done": update(() => {}, false); setIsRunning(false); return "done";
+      case "done": update(() => {}, false); setIsRunning(false); setActivityRevision((value) => value + 1); return "done";
     }
     return null;
   }, [fetchApproval, updateAssistantMessage]);
@@ -685,24 +707,24 @@ export function MyRuntimeProvider({
   if (initialLoading) {
     return (
       <ApprovalProvider value={approvalValue}>
-        <AssistantRuntimeProvider runtime={runtime}>
+        <RunInspectorProvider threadId={threadId} discoveredRuns={discoveredRuns} activityRevision={activityRevision}><AssistantRuntimeProvider runtime={runtime}>
           <div className="flex h-full items-center justify-center">
             <div className="animate-pulse text-sm text-muted-foreground">Loading chat...</div>
           </div>
-        </AssistantRuntimeProvider>
+        </AssistantRuntimeProvider></RunInspectorProvider>
       </ApprovalProvider>
     );
   }
 
   return (
     <ApprovalProvider value={approvalValue}>
-      <AssistantRuntimeProvider runtime={runtime}>
+      <RunInspectorProvider threadId={threadId} discoveredRuns={discoveredRuns} activityRevision={activityRevision}><AssistantRuntimeProvider runtime={runtime}>
         <ThreadListRefreshContext.Provider value={threadList.refresh}>
           <BackendMessageIdContext.Provider value={backendIds}>
             <ThreadIdContext.Provider value={threadId}>{children}</ThreadIdContext.Provider>
           </BackendMessageIdContext.Provider>
         </ThreadListRefreshContext.Provider>
-      </AssistantRuntimeProvider>
+      </AssistantRuntimeProvider></RunInspectorProvider>
     </ApprovalProvider>
   );
 }

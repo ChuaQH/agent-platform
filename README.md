@@ -65,8 +65,11 @@ flowchart TB
     STREAM --> RUNNER["AgentRunner<br/>ReAct loop"]
     RUNNER --> LLM["LLMClient"] --> API["DeepSeek API"]
     RUNNER --> CONV["Conversation<br/>in-memory model-visible state"]
-    RUNNER --> REG["request-local ToolRegistry<br/>(filtered per user)"]
+    RUNNER --> GATEWAY["RegistryExecutionGateway<br/>schema · policy · budget · approval"]
+    GATEWAY --> REG["request-local ToolRegistry<br/>(filtered per user)"]
     REG --> TOOLS["19 tools"]
+    GATEWAY --> RUNS["durable agent runs<br/>actions · approvals · events"]
+    RUNS --> INSPECTOR["Owner-scoped Run Inspector"]
     STREAM --> PG[("PostgreSQL + pgvector<br/>Alembic head 007")]
     CTX --> PG
     TOOLS --> PG
@@ -166,7 +169,7 @@ trees on Ctrl+C.
 
 ## Database and migrations
 
-- Alembic owns the schema; the full history is `001` → `007` (head).
+- Alembic owns the schema; the full history is `001` → `010` (head).
 - New schema changes: edit the SQLAlchemy models, then
   `alembic revision --autogenerate -m "..."`, review the generated file,
   and verify with `alembic check` (zero unexpected drift) — the same check
@@ -204,6 +207,26 @@ Frontend checks: `npx tsc --noEmit` and `npm run build` (run in
 For offline control conformance and optional live-model behaviour evaluation,
 see [governed agent evaluations](docs/AGENT_CONTROL_EVALUATIONS.md). The
 default scripted suite uses only temporary/in-memory evaluation tools.
+
+For exact-action approval and durable resume behaviour, see
+[approval workflow testing](docs/APPROVAL_WORKFLOW_TESTING.md). The
+[governed run inspector](docs/GOVERNED_RUN_INSPECTOR.md) documents the
+owner-scoped, redacted activity view. Strategy contracts and trade-offs are
+documented in [governed agent evaluations](docs/AGENT_CONTROL_EVALUATIONS.md).
+
+## Governed-execution evidence
+
+Phase 5D ran 80 live v1.2 scenario executions across React and plan-react:
+both completed 35/40 tasks, with zero observed prohibited executions,
+approval bypasses, or duplicate dispatches. Plan-react incurred additional
+model calls, tokens, and latency. Phase 5E scripted v1.3 bounded-recovery
+conformance passed 9/9 scenarios for each strategy. Those scripted results
+are mechanism evidence, not live-model evidence; live recovery utility is not
+established.
+
+> Run Inspector screenshot placeholder: no authenticated local run screenshot
+> is committed because it could contain user-derived action metadata. The
+> inspector layout is documented in `docs/GOVERNED_RUN_INSPECTOR.md`.
 
 ## Configuration
 

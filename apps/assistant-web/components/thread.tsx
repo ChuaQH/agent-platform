@@ -15,6 +15,8 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ApprovalCards } from "@/components/approval-card";
 import { useApprovals } from "@/lib/approval-context";
+import { useRunInspector } from "@/lib/run-inspector-context";
+import { useThreadId } from "@/lib/thread-id";
 import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
@@ -127,6 +129,8 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             <Welcome />
           </AuiIf>
 
+          <ThreadActivityControl />
+
           <div
             data-slot="aui_message-group"
             className="mb-14 flex flex-col gap-y-6 empty:hidden"
@@ -155,6 +159,13 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
   );
+};
+
+const ThreadActivityControl: FC = () => {
+  const threadId = useThreadId();
+  const { openThreadActivity } = useRunInspector();
+  if (!threadId) return null;
+  return <div className="mb-3 flex justify-end"><Button type="button" size="sm" variant="outline" onClick={openThreadActivity}>Activity</Button></div>;
 };
 
 const ThreadMessage: FC = () => {

@@ -3,6 +3,7 @@
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { type ApprovalState, useApprovals } from "@/lib/approval-context";
+import { useRunInspector } from "@/lib/run-inspector-context";
 import { CheckCircle2Icon, ChevronDownIcon, Clock3Icon, ShieldAlertIcon, XCircleIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
@@ -53,6 +54,7 @@ function SpecialPreview({ approval }: { approval: ApprovalState }) {
 
 function ApprovalCard({ approval }: { approval: ApprovalState }) {
   const { decide } = useApprovals();
+  const { openRunInspector } = useRunInspector();
   const [reasonOpen, setReasonOpen] = useState(false);
   const [reason, setReason] = useState("");
   const expired = isExpired(approval);
@@ -75,7 +77,7 @@ function ApprovalCard({ approval }: { approval: ApprovalState }) {
               {reasonOpen && <div className="flex w-full gap-2"><label className="sr-only" htmlFor={`denial-${approval.action_id}`}>Optional denial reason</label><input id={`denial-${approval.action_id}`} value={reason} maxLength={500} onChange={(event) => setReason(event.target.value)} placeholder="Optional reason" className="h-8 min-w-0 flex-1 rounded border bg-background px-2 text-sm" /><Button type="button" size="sm" variant="destructive" onClick={submitDeny} disabled={disabled}>Confirm denial</Button></div>}
             </div>
           )}
-          <Collapsible><CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground underline underline-offset-2">Technical details <ChevronDownIcon className="size-3" /></CollapsibleTrigger><CollapsibleContent className="mt-1 space-y-1 text-xs text-muted-foreground"><p>Action ID: <code>{approval.action_id}</code></p><p>Fingerprint: <code title={approval.fingerprint}>{shortFingerprint(approval.fingerprint)}</code></p></CollapsibleContent></Collapsible>
+          <div className="flex flex-wrap items-center gap-2"><Button type="button" size="sm" variant="ghost" onClick={() => openRunInspector(approval.run_id)}>Run details</Button><Collapsible><CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground underline underline-offset-2">Technical details <ChevronDownIcon className="size-3" /></CollapsibleTrigger><CollapsibleContent className="mt-1 space-y-1 text-xs text-muted-foreground"><p>Action ID: <code>{approval.action_id}</code></p><p>Fingerprint: <code title={approval.fingerprint}>{shortFingerprint(approval.fingerprint)}</code></p></CollapsibleContent></Collapsible></div>
         </div>
       </div>
     </section>
