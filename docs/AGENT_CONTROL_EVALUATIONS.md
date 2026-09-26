@@ -84,7 +84,7 @@ To compare the two strategy plumbing paths without a live model:
 ```powershell
 python -m evaluations.agent_controls run --mode scripted --strategy react `
   --configuration enforced_policy_with_approval --scenario-category strategy --output evaluation-results/
-python -m evaluations.agent_controls run --mode scripted --strategy plan_before_react `
+python -m evaluations.agent_controls run --mode scripted --strategy plan_react `
   --configuration enforced_policy_with_approval --scenario-category strategy --output evaluation-results/
 ```
 

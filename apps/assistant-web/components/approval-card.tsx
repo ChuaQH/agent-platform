@@ -3,37 +3,17 @@
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { type ApprovalState, useApprovals } from "@/lib/approval-context";
+import { approvalPreviewText, approvalStatusCopy, isApprovalExpired } from "@/lib/approval-utils";
 import { useRunInspector } from "@/lib/run-inspector-context";
 import { CheckCircle2Icon, ChevronDownIcon, Clock3Icon, ShieldAlertIcon, XCircleIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 function asPreview(value: unknown): string {
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
+  return approvalPreviewText(value);
 }
 
 function shortFingerprint(value: string): string {
   return value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value;
-}
-
-function statusCopy(approval: ApprovalState): string {
-  if (approval.uiStatus === "submitting_decision") return "Recording your decision…";
-  if (approval.uiStatus === "resuming") return approval.durableStatus === "denied" ? "Denied; continuing the assistant…" : "Approved; resuming…";
-  if (approval.uiStatus === "error") return approval.error || "The decision could not be completed. Refresh and try again.";
-  if (approval.durableStatus === "expired") return "This approval has expired.";
-  if (approval.durableStatus === "denied") return approval.executionStatus ? "Denied; the assistant received the result." : "Denied; awaiting continuation.";
-  if (approval.durableStatus === "approved") return approval.executionStatus ? "Approved; action result received." : "Approved; awaiting execution.";
-  if (approval.durableStatus === "executing") return "Approved; action is executing…";
-  if (approval.durableStatus === "resolved") return `Action resolved${approval.executionStatus ? ` (${approval.executionStatus})` : ""}.`;
-  return "The assistant is requesting permission before it continues.";
-}
-
-function isExpired(approval: ApprovalState): boolean {
-  return approval.durableStatus === "expired" || Date.parse(approval.expires_at) <= Date.now();
 }
 
 function SpecialPreview({ approval }: { approval: ApprovalState }) {
@@ -57,7 +37,7 @@ function ApprovalCard({ approval }: { approval: ApprovalState }) {
   const { openRunInspector } = useRunInspector();
   const [reasonOpen, setReasonOpen] = useState(false);
   const [reason, setReason] = useState("");
-  const expired = isExpired(approval);
+  const expired = isApprovalExpired(approval);
   const disabled = expired || approval.uiStatus === "submitting_decision" || approval.uiStatus === "resuming" || approval.durableStatus !== "pending";
   const expires = useMemo(() => new Date(approval.expires_at).toLocaleString(), [approval.expires_at]);
   const submitDeny = () => decide(approval.action_id, "denied", reason.trim() || undefined);
@@ -67,7 +47,7 @@ function ApprovalCard({ approval }: { approval: ApprovalState }) {
       <div className="flex gap-2">
         {expired ? <Clock3Icon className="mt-0.5 size-5 text-muted-foreground" aria-hidden /> : approval.durableStatus === "denied" ? <XCircleIcon className="mt-0.5 size-5 text-destructive" aria-hidden /> : approval.durableStatus === "approved" || approval.durableStatus === "resolved" ? <CheckCircle2Icon className="mt-0.5 size-5 text-green-600 dark:text-green-400" aria-hidden /> : <ShieldAlertIcon className="mt-0.5 size-5 text-amber-600 dark:text-amber-400" aria-hidden />}
         <div className="min-w-0 flex-1 space-y-2">
-          <div><h3 id={`approval-${approval.action_id}`} className="font-medium">Allow {approval.tool_name.replaceAll("_", " ")}</h3><p className="text-sm text-muted-foreground" role={approval.uiStatus === "error" ? "alert" : undefined}>{statusCopy(approval)}</p></div>
+          <div><h3 id={`approval-${approval.action_id}`} className="font-medium">Allow {approval.tool_name.replaceAll("_", " ")}</h3><p className="text-sm text-muted-foreground" role={approval.uiStatus === "error" ? "alert" : undefined}>{approvalStatusCopy(approval)}</p></div>
           <div><p className="mb-1 text-xs font-medium text-muted-foreground">Requested action</p><SpecialPreview approval={approval} /></div>
           <p className="text-xs text-muted-foreground">Required: {approval.required_capabilities.join(", ") || "No additional capability declared"} · {expired ? "Expired" : `Expires ${expires}`}</p>
           {approval.durableStatus === "pending" && !expired && (

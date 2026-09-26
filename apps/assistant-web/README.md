@@ -34,14 +34,18 @@ Production-style checks:
 
 ```bash
 npx tsc --noEmit
+npm test
 npm run build
 ```
 
 ## Backend contract
 
 - `POST /api/chat` returns a `text/event-stream`; events are
-  `data: {"type": ..., ...}` lines (`reasoning`, `tool_call`,
+  `data: {"type": ..., ...}` lines (`run_started`, `reasoning`, `tool_call`,
   `tool_result`, `text`, `usage`, `limit_reached`, `done`, `error`).
+- The frontend handles `run_started` as a safe control event and makes the
+  current durable run discoverable through the thread Activity dialog. It does
+  not render it as chat content.
 - `client_message_id` is sent with every chat POST; a `409
   duplicate_message` means the message was already accepted and the thread
   is reloaded instead of re-sending.

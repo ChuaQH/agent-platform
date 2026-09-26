@@ -2,6 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { mergeRunSummaries, parseRunSummaries, previewText as formatPreview, readableReason as reasonMessage, runStatusLabel, type ThreadRunSummary } from "@/lib/governed-run-utils";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -26,12 +27,7 @@ type Audit = {
   timeline: { sequence: number; action_id: string | null; action_sequence: number | null; state: string; label: string; timestamp: string; reason_code: string | null }[];
 };
 
-export type ThreadRunSummary = {
-  run_id: string; strategy: string; status: "running" | "waiting_for_approval" | "completed" | "failed" | "cancelled";
-  created_at: string; updated_at: string; completed_at: string | null; terminal_reason: string | null;
-  action_count: number; executed_count: number; succeeded_count: number; rejected_count: number;
-  waiting_for_approval_count: number; uncertain_count: number; has_pending_approval: boolean;
-};
+export type { ThreadRunSummary } from "@/lib/governed-run-utils";
 
 type InspectorContextValue = {
   openRunInspector: (runId: string) => void;
@@ -44,22 +40,11 @@ function getToken(): string | null {
 }
 
 export function previewText(value: unknown): string {
-  if (typeof value === "string") return value;
-  try { return JSON.stringify(value, null, 2); } catch { return "Preview unavailable"; }
+  return formatPreview(value);
 }
 
 export function readableReason(code: string | null): string | null {
-  if (!code) return null;
-  const messages: Record<string, string> = {
-    invalid_json: "The proposed arguments were not valid JSON.", arguments_not_object: "The proposed arguments were not an object.",
-    schema_validation_failed: "The proposed arguments did not match this tool’s contract.", tool_unavailable: "The tool was not available in this run.",
-    tool_not_allowed: "This tool was outside the effective allowlist.", capability_not_allowed: "The action required a capability outside the effective policy.",
-    approval_required: "The gateway paused before dispatch for exact-action approval.", approval_denied: "The exact action was denied and was not dispatched.",
-    approval_expired: "The approval expired before dispatch.", tool_call_limit_exhausted: "The run’s total tool-call limit was reached.",
-    per_tool_call_limit_exhausted: "This tool’s call limit was reached.", cumulative_execution_time_exhausted: "The cumulative tool-execution-time limit was reached.",
-    tool_execution_failed: "The tool reported an execution failure.", execution_interrupted: "Dispatch began, but the outcome is uncertain after interruption.",
-  };
-  return messages[code] || `Gateway reason: ${code.replaceAll("_", " ")}.`;
+  return reasonMessage(code);
 }
 
 function shortFingerprint(value: string | null): string {
@@ -106,14 +91,12 @@ export function RunInspectorProvider({
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (!response.ok) throw new Error(response.status === 404 ? "This thread is unavailable." : "Activity could not be loaded.");
-      const value = await response.json() as { runs?: ThreadRunSummary[]; next_cursor?: string | null };
+      const value = await response.json() as { runs?: unknown; next_cursor?: string | null };
+      const incoming = parseRunSummaries(value.runs);
       setRuns((current) => {
         if (activeThreadRef.current !== expectedThread) return current;
-        const incoming = value.runs || [];
         if (reset) return incoming;
-        const byId = new Map(current.map((item) => [item.run_id, item]));
-        for (const item of incoming) byId.set(item.run_id, item);
-        return [...byId.values()];
+        return mergeRunSummaries(current, incoming);
       });
       if (activeThreadRef.current === expectedThread) {
         nextCursorRef.current = value.next_cursor || null;
@@ -139,9 +122,7 @@ export function RunInspectorProvider({
   useEffect(() => {
     if (!activityOpen || !discoveredRuns.length) return;
     setRuns((current) => {
-      const byId = new Map(current.map((item) => [item.run_id, item]));
-      for (const item of discoveredRuns) if (!byId.has(item.run_id)) byId.set(item.run_id, item);
-      return [...byId.values()].sort((left, right) => right.updated_at.localeCompare(left.updated_at) || right.run_id.localeCompare(left.run_id));
+      return mergeRunSummaries(discoveredRuns, current);
     });
   }, [activityOpen, discoveredRuns]);
 
@@ -204,10 +185,7 @@ function AuditPanel({ audit }: { audit: Audit }) {
 }
 
 function RunSummaryCard({ run }: { run: ThreadRunSummary }) {
-  const status = {
-    running: "Running", waiting_for_approval: "Waiting for approval", completed: "Completed",
-    failed: "Failed", cancelled: "Cancelled",
-  }[run.status];
+  const status = runStatusLabel(run.status);
   return <span className="block w-full"><span className="flex flex-wrap justify-between gap-2"><span className="font-medium">{status}</span><span className="text-xs text-muted-foreground">{stamp(run.created_at)}</span></span><span className="mt-1 block text-xs text-muted-foreground">{run.strategy} - {run.action_count} action{run.action_count === 1 ? "" : "s"}{run.has_pending_approval ? " - approval pending" : ""}</span></span>;
 }
 

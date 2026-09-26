@@ -136,9 +136,9 @@ See the README's "Known Limitations" for the full list. The headline items:
 - Blocking-sync tools can't be forcibly cancelled by asyncio.
 - Model-provider availability is intentionally not part of readiness.
 - Single-node assumptions; no distributed execution or async job resume.
-- Frontend: `npm audit` reports 4 high-severity advisories in the current
-  lockfile; `package.json` uses `latest` ranges (the lockfile pins actual
-  versions used in CI).
+- Frontend: `npm audit` is informational; review its current advisories before
+  a dependency-upgrade release. `package.json` still uses `latest` ranges
+  while the lockfile pins CI's actual dependency resolution.
 - Personal memory scaling is bounded by pgvector-in-PostgreSQL at this
   scale.
 
