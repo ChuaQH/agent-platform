@@ -21,6 +21,7 @@ controls implemented today and their residual risk.
 | Browser -> authenticated API | request bodies, thread/run IDs, stream consumers | bearer-session authentication; owner-scoped queries; identical not-found responses for foreign/unknown thread and run IDs |
 | Model output -> execution gateway | tool name and raw JSON arguments | request-local registry lookup; JSON-object requirement; JSON Schema validation; normalized rejection result |
 | Gateway -> tools | validated canonical arguments | immutable effective policy, capability/tool checks, budgets, timeout/exception containment, approval gate |
+| Gateway -> file tools | model-relative path | server-derived per-user workspace, cross-platform absolute/traversal rejection, resolved-path containment, existing-link escape checks |
 | Application -> PostgreSQL | application writes and administrative access | SQLAlchemy parameterization, constraints, Alembic, separate guarded integration database |
 | Application -> external providers | provider response, tool output, network failures | bounded calls/timeouts, controlled errors, provider failure handling; external output remains untrusted |
 | Pause/resume lifecycle | approval decisions and durable continuation | owner scope, exact fingerprint matching, expiry, atomic claim before resume |
@@ -34,6 +35,7 @@ controls implemented today and their residual risk.
 | Invalid model arguments | Raw JSON parsing, object requirement, JSON Schema validation, no empty-object fallback | A correct schema still depends on a correct tool contract |
 | Capability escalation | Request-local tool registry, immutable effective policy, capability and allow-list checks at gateway | Incorrect capability metadata can under-classify a tool |
 | Unauthorized thread/run access | Authenticated owner-scoped thread, run, action, approval, feedback, and audit queries; foreign IDs get normal not-found responses | Compromised sessions or privileged database access remain high impact |
+| One user reading or overwriting another user's files | File tools resolve only relative paths beneath a directory derived from authenticated server identity; user IDs are not used as ordinary directory names | Application-level segregation is not an OS sandbox; a compromised process, filesystem races, storage exhaustion, or an unsafe future tool can bypass it |
 | Approval bypass, replay, or mismatch | Exact canonical-action fingerprint, authenticated decision, expiry, revalidation on resume, durable events | A fingerprint identifies a stored exact action; it is not a signature or proof of intent |
 | Duplicate/concurrent resume | Durable claim conflict prevents a second local resumer from dispatching | This is application-level coordination, not exactly-once external execution |
 | Cancellation after dispatch or timeout ambiguity | Cancellation/timeout lifecycle records and `uncertain` normalized outcome | A crash or lost response after dispatch may leave the external result unknown |

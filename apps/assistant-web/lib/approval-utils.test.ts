@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvalPreviewText, approvalStatusCopy, isApprovalExpired } from "./approval-utils";
+import { approvalPreviewText, approvalStatusCopy, isApprovalExpired, isApprovalVisible } from "./approval-utils";
 
 describe("approval display helpers", () => {
   it("uses an inert JSON preview for structured values", () => {
@@ -10,5 +10,12 @@ describe("approval display helpers", () => {
   it("maps safe approval status copy and expiry", () => {
     expect(approvalStatusCopy({ durableStatus: "denied", uiStatus: "idle", expires_at: "2099-01-01T00:00:00Z" })).toContain("Denied");
     expect(isApprovalExpired({ durableStatus: "pending", expires_at: "2000-01-01T00:00:00Z" }, Date.parse("2026-01-01T00:00:00Z"))).toBe(true);
+  });
+
+  it("keeps only undecided approvals visible", () => {
+    expect(isApprovalVisible({ durableStatus: "pending" })).toBe(true);
+    expect(isApprovalVisible({ durableStatus: "approved" })).toBe(false);
+    expect(isApprovalVisible({ durableStatus: "denied" })).toBe(false);
+    expect(isApprovalVisible({ durableStatus: "expired" })).toBe(false);
   });
 });

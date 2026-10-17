@@ -198,6 +198,5 @@ function ActionCard({ action }: { action: AuditAction }) {
     <pre className="mt-2 max-h-32 overflow-auto rounded bg-muted/70 p-2 text-xs whitespace-pre-wrap">{previewText(action.arguments_preview)}</pre>
     <div className="mt-2 flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" onClick={() => setExpanded((open) => !open)}>{expanded ? "Hide transitions" : "Show transitions"}</Button><Button type="button" size="sm" variant="ghost" onClick={copy} disabled={!action.fingerprint}>Copy action fingerprint</Button><span className="self-center text-xs text-muted-foreground" title={action.fingerprint || undefined}>{shortFingerprint(action.fingerprint)}</span></div>
     {expanded && <div className="mt-2 border-t pt-2 text-xs"><p className="mb-1 text-muted-foreground">The fingerprint identifies this exact approved action; it is not a digital signature.</p><ul className="space-y-1">{action.events.map((event, index) => <li key={`${event.state}-${index}`}>{event.state.replaceAll("_", " ")} · {stamp(event.timestamp)}{event.reason_code ? ` · ${event.reason_code}` : ""}</li>)}</ul></div>}
-    {expanded && action.fingerprint && <code className="mb-2 block break-all rounded bg-muted p-2 text-xs">{action.fingerprint}</code>}
   </li>;
 }

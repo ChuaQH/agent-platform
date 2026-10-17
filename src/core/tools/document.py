@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from core.tool_framework import Tool, ToolCapability
-from core.tools.file_io import _resolve, _DEFAULT_WORKSPACE
+from core.tools.file_io import _workspace
+from core.user_workspace import UserWorkspace, WorkspacePathError
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +37,13 @@ class ExtractTextTool(Tool):
         "required": ["path"],
     }
 
-    def __init__(self, workspace: Path | None = None):
-        self.workspace = Path(workspace or _DEFAULT_WORKSPACE).resolve()
+    def __init__(self, workspace: UserWorkspace | Path | None = None):
+        self.workspace = _workspace(workspace)
 
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
-            target = _resolve(path, self.workspace)
-        except ValueError as e:
+            target = self.workspace.resolve(path)
+        except WorkspacePathError as e:
             return f"Error: {e}"
 
         if not target.exists():
@@ -100,13 +101,13 @@ class ReadSpreadsheetTool(Tool):
         "required": ["path"],
     }
 
-    def __init__(self, workspace: Path | None = None):
-        self.workspace = Path(workspace or _DEFAULT_WORKSPACE).resolve()
+    def __init__(self, workspace: UserWorkspace | Path | None = None):
+        self.workspace = _workspace(workspace)
 
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
-            target = _resolve(path, self.workspace)
-        except ValueError as e:
+            target = self.workspace.resolve(path)
+        except WorkspacePathError as e:
             return f"Error: {e}"
 
         if not target.exists():

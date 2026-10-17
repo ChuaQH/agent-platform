@@ -9,10 +9,16 @@ import {
   useIsMarkdownCodeBlock,
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
-import { type FC, memo, useState } from "react";
+import { type ComponentProps, type FC, memo, useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/tooltip-icon-button";
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 const MarkdownTextImpl = () => {
@@ -74,6 +80,45 @@ const useCopyToClipboard = ({
   };
 
   return { isCopied, copyToClipboard };
+};
+
+const MarkdownImage: FC<ComponentProps<"img">> = ({
+  alt,
+  className,
+  src,
+  ...props
+}) => {
+  const label = alt?.trim() || "Image preview";
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <button
+          type="button"
+          className="my-2 block max-w-full cursor-zoom-in rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
+          aria-label={`Enlarge image: ${label}`}
+        >
+          <img
+            {...props}
+            src={src}
+            alt={alt}
+            className={cn("aui-md-image max-h-80 max-w-full rounded-md object-contain", className)}
+          />
+        </button>
+      </DialogTrigger>
+      <DialogContent
+        className="w-auto max-w-[calc(100%-2rem)] border-0 bg-transparent p-2 shadow-none sm:max-w-[min(96vw,80rem)] [&>button]:bg-background/80 [&>button]:opacity-100"
+      >
+        <DialogTitle className="sr-only">{label}</DialogTitle>
+        <img
+          {...props}
+          src={src}
+          alt={alt}
+          className="max-h-[85vh] max-w-[92vw] rounded-md object-contain"
+        />
+      </DialogContent>
+    </Dialog>
+  );
 };
 
 const defaultComponents = memoizeMarkdownComponents({
@@ -255,5 +300,6 @@ const defaultComponents = memoizeMarkdownComponents({
       />
     );
   },
+  img: MarkdownImage,
   CodeHeader,
 });

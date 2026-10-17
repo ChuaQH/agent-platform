@@ -124,6 +124,9 @@ there is no single transaction wrapping a whole generation.
 - Server-built identity and immutable effective policy—not model arguments—set
   the authority boundary. Exact-action approval is durable, owner-scoped, and
   revalidated before dispatch.
+- File tools receive a server-derived per-user workspace. Models supply only
+  relative paths; legacy files in the former shared workspace are not migrated
+  or exposed through authenticated file tools.
 - Tool/turn/time budgets and normalized failure states make refusals and
   ambiguous outcomes observable. The gateway cannot provide exactly-once
   execution at a non-transactional external service.

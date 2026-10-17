@@ -29,9 +29,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.conversation import Conversation
 from core.llm_client import LLMClient
-from assistant.agent_runner import AgentExecutionError, AgentRunner, LlmCallRecord
+from assistant.agent_runner import AgentExecutionError, LlmCallRecord
 from assistant import thread_store
 from assistant.run_recorder import AgentRunStatus, RunRecorder
+from assistant.strategy import AgentStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ async def generate_title(user_message: str, llm: LLMClient) -> str | None:
 
 async def stream_agent_events(
     *,
-    runner: AgentRunner,
+    runner: AgentStrategy,
     conversation: Conversation,
     db: AsyncSession,
     thread_id: str,

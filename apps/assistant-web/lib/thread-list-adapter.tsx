@@ -78,15 +78,18 @@ export function useThreadListAdapter({
   }, [refresh]);
 
   const onDelete = useCallback(
-    async (threadId: string) => {
+    async (id: string) => {
       try {
-        await authFetch(`/api/threads/${threadId}`, { method: "DELETE" });
-        refresh();
+        await authFetch(`/api/threads/${id}`, { method: "DELETE" });
+        if (id === threadId) {
+          onSwitchToNewThread();
+        }
+        await refresh();
       } catch {
         // ignore
       }
     },
-    [refresh]
+    [onSwitchToNewThread, refresh, threadId]
   );
 
   const onRename = useCallback(

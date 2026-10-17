@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { type ApprovalState, useApprovals } from "@/lib/approval-context";
-import { approvalPreviewText, approvalStatusCopy, isApprovalExpired } from "@/lib/approval-utils";
+import { approvalPreviewText, approvalStatusCopy, isApprovalExpired, isApprovalVisible } from "@/lib/approval-utils";
 import { useRunInspector } from "@/lib/run-inspector-context";
 import { CheckCircle2Icon, ChevronDownIcon, Clock3Icon, ShieldAlertIcon, XCircleIcon } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -66,6 +66,7 @@ function ApprovalCard({ approval }: { approval: ApprovalState }) {
 
 export function ApprovalCards() {
   const { approvals } = useApprovals();
-  if (!approvals.length) return null;
-  return <div className="space-y-3" aria-label="Pending assistant approvals">{approvals.map((approval) => <ApprovalCard key={approval.action_id} approval={approval} />)}</div>;
+  const pendingApprovals = approvals.filter(isApprovalVisible);
+  if (!pendingApprovals.length) return null;
+  return <div className="space-y-3" aria-label="Pending assistant approvals">{pendingApprovals.map((approval) => <ApprovalCard key={approval.action_id} approval={approval} />)}</div>;
 }

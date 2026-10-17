@@ -1,7 +1,4 @@
-"""File I/O tools — read and write files within a sandboxed workspace.
-
-Path traversal protection ensures tools cannot escape the workspace directory.
-"""
+"""File I/O tools backed by a server-derived user workspace."""
 
 from __future__ import annotations
 
@@ -10,21 +7,21 @@ from pathlib import Path
 from typing import Any
 
 from core.tool_framework import Tool, ToolCapability
+from core.user_workspace import UserWorkspace, WorkspacePathError
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_WORKSPACE = Path("agent-data") / "workspace"
 _MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB read limit
 _MAX_LINES = 2000  # Truncate reads to this many lines
 
 
-def _resolve(path: str, workspace: Path) -> Path:
-    """Resolve a path within the workspace, blocking traversal escapes."""
-    workspace = workspace.resolve()
-    target = (workspace / path).resolve()
-    if workspace not in target.parents and target != workspace:
-        raise ValueError(f"Path escapes workspace: {path}")
-    return target
+def _workspace(value: UserWorkspace | Path | None) -> UserWorkspace:
+    """Require an explicit server or test workspace; never use legacy files."""
+    if isinstance(value, UserWorkspace):
+        return value
+    if value is None:
+        raise ValueError("File tools require an explicit UserWorkspace or test workspace path")
+    return UserWorkspace.for_testing(value)
 
 
 class ReadFileTool(Tool):
@@ -33,7 +30,7 @@ class ReadFileTool(Tool):
     description = (
         "Read the contents of a file from the workspace. "
         "Returns the file content as text. Large files are truncated. "
-        "The workspace root is the project's agent-data/workspace directory."
+        "The server selects your workspace."
     )
     when_to_use = "To read the contents of a file from the workspace."
     how_to_use = "Provide a relative path to the file within the workspace."
@@ -48,15 +45,14 @@ class ReadFileTool(Tool):
         "required": ["path"],
     }
 
-    def __init__(self, workspace: Path | None = None):
-        self.workspace = Path(workspace or _DEFAULT_WORKSPACE).resolve()
-        self.workspace.mkdir(parents=True, exist_ok=True)
+    def __init__(self, workspace: UserWorkspace | Path | None = None):
+        self.workspace = _workspace(workspace)
 
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
-            target = _resolve(path, self.workspace)
-        except ValueError as e:
-            return f"Error: {e}"
+            target = self.workspace.resolve(path)
+        except WorkspacePathError as exc:
+            return f"Error: {exc}"
 
         if not target.exists():
             return f"File not found: {path}"
@@ -112,15 +108,14 @@ class WriteFileTool(Tool):
         "required": ["path", "content"],
     }
 
-    def __init__(self, workspace: Path | None = None):
-        self.workspace = Path(workspace or _DEFAULT_WORKSPACE).resolve()
-        self.workspace.mkdir(parents=True, exist_ok=True)
+    def __init__(self, workspace: UserWorkspace | Path | None = None):
+        self.workspace = _workspace(workspace)
 
     async def execute(self, path: str = "", content: str = "", **kwargs: Any) -> str:
         try:
-            target = _resolve(path, self.workspace)
-        except ValueError as e:
-            return f"Error: {e}"
+            target = self.workspace.resolve(path)
+        except WorkspacePathError as exc:
+            return f"Error: {exc}"
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)

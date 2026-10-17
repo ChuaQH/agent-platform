@@ -164,6 +164,7 @@ class AgentStrategy(Protocol):
     continuation: RunnerContinuation | None
 
     async def run(self, conversation: Conversation) -> AsyncGenerator[AgentEvent, None]: ...
+    def execution_budget_snapshot(self) -> dict[str, object] | None: ...
 
 
 class ReactStrategy:
@@ -185,6 +186,9 @@ class ReactStrategy:
     @property
     def planning(self) -> PlanningTelemetry:
         return PlanningTelemetry()
+
+    def execution_budget_snapshot(self) -> dict[str, object] | None:
+        return self._runner.execution_budget_snapshot()
 
     async def run(self, conversation: Conversation) -> AsyncGenerator[AgentEvent, None]:
         async for event in self._runner.run(conversation):
@@ -215,6 +219,9 @@ class PlanBeforeReactStrategy:
     @property
     def continuation(self) -> RunnerContinuation | None:
         return self._runner.continuation if self._runner else None
+
+    def execution_budget_snapshot(self) -> dict[str, object] | None:
+        return self._runner.execution_budget_snapshot() if self._runner else None
 
     def _planner_messages(self, conversation: Conversation, repair: bool = False) -> list[dict[str, str]]:
         task = next((message.get("content", "") for message in reversed(conversation.messages)
@@ -526,6 +533,9 @@ class PlanReactStrategy:
     @property
     def planning(self) -> PlanningTelemetry:
         return self.controller.state.planning if self.controller else PlanningTelemetry()
+
+    def execution_budget_snapshot(self) -> dict[str, object] | None:
+        return self._runner.execution_budget_snapshot() if self._runner else None
 
     async def run(self, conversation: Conversation) -> AsyncGenerator[AgentEvent, None]:
         goal = next((str(message.get("content", "")) for message in reversed(conversation.messages)

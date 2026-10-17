@@ -31,6 +31,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import Config
+from core.user_workspace import UserWorkspace
 
 from pathlib import Path as _Path
 try:
@@ -439,8 +440,12 @@ def _new_llm() -> LLMClient:
 
 
 def _build_tool_registry(
-    user_id: str, db: AsyncSession, *, workspace: Path | None = None,
+    user_id: str, db: AsyncSession, *, workspace: UserWorkspace | Path | None = None,
 ) -> ToolRegistry:
+    # File tools share one trusted, request-local resolver.  ``workspace`` is
+    # retained solely as an explicit dependency-injection seam for tests and
+    # direct library callers; production requests always derive from user_id.
+    file_workspace = workspace or UserWorkspace(config.workspace_root, user_id)
     personal_memory = PersonalMemory(db)
     registry = ToolRegistry()
     registry.register(WebSearchTool(api_key=config.brave_api_key))
@@ -454,10 +459,10 @@ def _build_tool_registry(
     registry.register(CurrencyTool())
     registry.register(WeatherTool())
     registry.register(UnitConvertTool())
-    registry.register(ReadFileTool(workspace=workspace))
-    registry.register(WriteFileTool(workspace=workspace))
-    registry.register(ExtractTextTool())
-    registry.register(ReadSpreadsheetTool())
+    registry.register(ReadFileTool(workspace=file_workspace))
+    registry.register(WriteFileTool(workspace=file_workspace))
+    registry.register(ExtractTextTool(workspace=file_workspace))
+    registry.register(ReadSpreadsheetTool(workspace=file_workspace))
     registry.register(InspectPythonCodeTool())
     registry.register(RememberTool(personal_memory, user_id=user_id))
     registry.register(RecallTool(personal_memory, user_id=user_id))

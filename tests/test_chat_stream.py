@@ -14,6 +14,7 @@ from core.llm_client import LLMResponse
 from core.tool_framework import ToolRegistry
 from assistant.agent_runner import AgentRunner
 from assistant.chat_stream import stream_agent_events
+from assistant.strategy import ReactStrategy
 
 from tests.fakes import CountingCalculator, ScriptedLLM, make_conversation, make_tool_call
 
@@ -74,13 +75,13 @@ async def _collect(runner: AgentRunner, conversation, db) -> list[str]:
     ]
 
 
-async def _collect_new_run(runner: AgentRunner, conversation, db, recorder) -> list[str]:
+async def _collect_new_run(runner, conversation, db, recorder, llm) -> list[str]:
     return [
         chunk
         async for chunk in stream_agent_events(
             runner=runner, conversation=conversation, db=db, thread_id="thread_1",
             user_id=1, request_id="req_1", model="test-model", provider="test-provider",
-            llm=runner._llm, generate_title=False, first_user_msg="", recorder=recorder,
+            llm=llm, generate_title=False, first_user_msg="", recorder=recorder,
             run_id="durable-run", run_strategy="plan_react",
         )
     ]
@@ -192,8 +193,24 @@ def test_new_durable_run_is_announced_once_before_model_events() -> None:
     asyncio.run(recorder.create_run(AgentRunRecord(
         "durable-run", "req_1", 1, "thread_1", {"allowed_capabilities": []}, strategy_name="plan_react",
     )))
-    events = parse_chunks(asyncio.run(_collect_new_run(runner, make_conversation(), FakeSession(), recorder)))
+    events = parse_chunks(asyncio.run(_collect_new_run(runner, make_conversation(), FakeSession(), recorder, llm)))
     assert [event["type"] for event in events] == ["run_started", "text", "usage", "done"]
     assert events[0] == {"type": "run_started", "run_id": "durable-run", "strategy": "plan_react", "status": "running"}
     assert recorder.runs["durable-run"].run_id == events[0]["run_id"]
     assert "thread_1" not in json.dumps(events[0]) and "arguments" not in events[0]
+
+
+def test_react_strategy_durable_run_finalizes_through_strategy_interface() -> None:
+    from assistant.run_recorder import AgentRunRecord, AgentRunStatus, InMemoryRunRecorder
+
+    llm = ScriptedLLM([LLMResponse(content="Hi", usage={})])
+    strategy = ReactStrategy(AgentRunner(llm=llm, tools=ToolRegistry(), max_turns=2))
+    recorder = InMemoryRunRecorder()
+    asyncio.run(recorder.create_run(AgentRunRecord(
+        "durable-run", "req_1", 1, "thread_1", {"allowed_capabilities": []}, strategy_name="react",
+    )))
+
+    events = parse_chunks(asyncio.run(_collect_new_run(strategy, make_conversation(), FakeSession(), recorder, llm)))
+
+    assert [event["type"] for event in events] == ["run_started", "text", "usage", "done"]
+    assert recorder.runs["durable-run"].status is AgentRunStatus.COMPLETED

@@ -23,6 +23,13 @@ export function approvalStatusCopy(approval: ApprovalPresentation): string {
   return "The assistant is requesting permission before it continues.";
 }
 
+/** Show only approval requests for which no durable decision exists yet. */
+export function isApprovalVisible(
+  approval: Pick<ApprovalPresentation, "durableStatus">,
+): boolean {
+  return approval.durableStatus === "pending";
+}
+
 export function isApprovalExpired(approval: Pick<ApprovalPresentation, "durableStatus" | "expires_at">, now = Date.now()): boolean {
   return approval.durableStatus === "expired" || Date.parse(approval.expires_at) <= now;
 }

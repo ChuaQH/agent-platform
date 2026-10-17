@@ -48,7 +48,7 @@ def _maintenance_url(database_url: str) -> str:
 
 def _scratch_db_url(database_url: str) -> str:
     """The scratch database url with the same credentials as the input."""
-    return _asyncpg_url(database_url).rsplit("/", 1)[0] + f"/{SCRATCH_DB_NAME}"
+    return database_url.rsplit("/", 1)[0] + f"/{SCRATCH_DB_NAME}"
 
 
 def _run_alembic(database_url: str, *args: str) -> None:
@@ -90,8 +90,8 @@ async def _drop_database(database_url: str) -> None:
         await conn.close()
 
 
-async def _db_revision(database_url: str) -> str | None:
-    conn = await asyncpg.connect(_scratch_db_url(database_url))
+async def _db_revision(scratch_database_url: str) -> str | None:
+    conn = await asyncpg.connect(_asyncpg_url(scratch_database_url))
     try:
         row = await conn.fetchrow("SELECT version_num FROM alembic_version")
         return row["version_num"] if row else None
@@ -110,7 +110,8 @@ async def _head_revision() -> str:
 
 def main() -> int:
     database_url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_URL
-    print(f"Scratch database: {database_url}")
+    scratch_database_url = _scratch_db_url(database_url)
+    print(f"Scratch database: {scratch_database_url}")
 
     async def run() -> None:
         head = await _head_revision()
@@ -119,29 +120,29 @@ def main() -> int:
         await _create_database(database_url)
         try:
             print("\n[1/6] alembic upgrade head (empty database)")
-            _run_alembic(database_url, "upgrade", "head")
+            _run_alembic(scratch_database_url, "upgrade", "head")
 
             print("\n[2/6] verify alembic_version == head")
-            revision = await _db_revision(database_url)
+            revision = await _db_revision(scratch_database_url)
             assert revision == head, f"revision {revision} != head {head}"
             print(f"OK: alembic_version={revision}")
 
             print("\n[3/6] alembic check (models load + zero drift)")
-            _run_alembic(database_url, "check")
+            _run_alembic(scratch_database_url, "check")
 
             print("\n[4/6] alembic downgrade -1 (Phase 4 migration)")
-            _run_alembic(database_url, "downgrade", "-1")
-            revision = await _db_revision(database_url)
+            _run_alembic(scratch_database_url, "downgrade", "-1")
+            revision = await _db_revision(scratch_database_url)
             print(f"After downgrade: alembic_version={revision}")
 
             print("\n[5/6] alembic upgrade head again")
-            _run_alembic(database_url, "upgrade", "head")
-            revision = await _db_revision(database_url)
+            _run_alembic(scratch_database_url, "upgrade", "head")
+            revision = await _db_revision(scratch_database_url)
             assert revision == head, f"revision {revision} != head {head}"
             print(f"OK: alembic_version={revision}")
 
             print("\n[6/6] alembic check after re-upgrade")
-            _run_alembic(database_url, "check")
+            _run_alembic(scratch_database_url, "check")
 
             print("\nAll lifecycle steps passed.")
         finally:
@@ -155,7 +156,7 @@ def main() -> int:
         print(f"FAILED: {e}", file=sys.stderr)
         return 1
     except SystemExit as e:
-        return int(e.code or 1)
+        return e.code if isinstance(e.code, int) else 1
     except Exception as e:  # noqa: BLE001 — report any failure clearly
         print(f"FAILED: {type(e).__name__}: {e}", file=sys.stderr)
         return 1

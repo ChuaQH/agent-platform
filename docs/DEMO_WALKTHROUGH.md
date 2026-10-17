@@ -15,8 +15,12 @@ endpoint.
   `python -m alembic upgrade head`, start the backend, then run
   `npm ci && npm run dev` in `apps/assistant-web`.
 
-The normal workspace root is `agent-data/workspace`. Use only the relative
-path `demo-phase6b/hello.txt`; do not request reads or writes outside it.
+The configured workspace root is normally `agent-data/workspace`. The server
+creates each authenticated user's files below `users/<safe-user-directory>/`;
+the model sees and supplies only relative paths such as
+`demo-phase6b/hello.txt`. Legacy shared files are not migrated or available
+through normal file tools. This is application-level directory segregation,
+not an OS sandbox.
 
 ## Sequence
 
@@ -45,8 +49,9 @@ path `demo-phase6b/hello.txt`; do not request reads or writes outside it.
 
 ## Cleanup
 
-Stop the backend/frontend. Delete only the demonstrated local directory
-`agent-data/workspace/demo-phase6b` if it was created. Stop the disposable
+Stop the backend/frontend. If needed, delete only the demonstrated
+`demo-phase6b` directory under the local user's server-derived workspace; do
+not treat the legacy shared root as user-visible. Stop the disposable
 test stack with `docker compose -f docker-compose.test.yml down -v`; do not
 use that command against the development compose file unless you deliberately
 intend to remove its data.

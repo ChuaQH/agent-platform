@@ -66,6 +66,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "tools": {
         "brave_api_key": "",
+        "workspace_root": "agent-data/workspace",
     },
 }
 
@@ -92,6 +93,7 @@ ENV_MAP: dict[str, tuple[tuple[str, ...], Any]] = {
     "ACA_LOG_FILE":             (("logging", "file"), str),
     "ACA_LOG_FORMAT":           (("logging", "format"), str),
     "BRAVE_API_KEY":            (("tools", "brave_api_key"), str),
+    "ACA_WORKSPACE_ROOT":       (("tools", "workspace_root"), str),
     "DATABASE_URL":             (("database", "url"), str),
 }
 
@@ -305,6 +307,12 @@ class Config:
     @property
     def brave_api_key(self) -> str:
         return self._get("tools", "brave_api_key", default="")
+
+    @property
+    def workspace_root(self) -> Path:
+        """Configured root beneath which authenticated user workspaces live."""
+        value = Path(self._get("tools", "workspace_root", default="agent-data/workspace"))
+        return value if value.is_absolute() else self.project_root / value
 
     # ── Derived paths ──
     @property
